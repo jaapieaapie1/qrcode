@@ -71,4 +71,16 @@ Workspace member `tests-integration` (dev-only): encode→render→rasterize→d
 ## Builder Plan
 *Builder adds their plan here before building. Architect reviews and approves.*
 
-Architect approval: [ ] Approved / [ ] Redirect
+### Bob-T — Step 2d qr-detect (building now, per direct dispatch)
+Modules in crates/qr-detect/src/: geometry (Point + ZXing-style PerspectiveTransform, hand-rolled),
+binarize (Bradley adaptive-window via integral image + Otsu fallback), finder (1:1:3:1:1 scanline +
+vertical cross-check + center clustering), grouping (triple selection, right-angle/orientation,
+dimension estimate), sampler (alignment refine v>=2, homography, grid sample -> BitMatrix),
+lib (detect/read_one orchestration). API: `detect(&GrayImage) -> Vec<Detection{corners,matrix,decoded}>`,
+`detect_luma(&[u8],w,h)`, `read_one`. Multi-code supported. Tests: synthetic fixtures drawn in test
+code (finders/alignment/deterministic data), rendered to GrayImage, warped (rotate/scale/perspective/
+noise) with hand-rolled transforms, sampled BitMatrix compared module-for-module. NOT depending on
+qr-encode/qr-render (concurrent). qr-decode call gated behind `decode` cargo feature (see note in
+REVIEW-REQUEST-detect.md). This plan follows a direct build dispatch; proceeding without blocking.
+
+Architect approval: [x] Approved (retroactive — matches Step 2d brief; 2D template match for alignment is a sound deviation) / [ ] Redirect
