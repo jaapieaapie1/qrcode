@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/qr-core",
+    "crates/qr-encode",
+    "crates/qr-decode",
+    "crates/qr-detect",
+    "crates/qr-video",
+    "crates/qr-render",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = ""
+
+[workspace.dependencies]
+qr-core = { path = "crates/qr-core" }
+qr-encode = { path = "crates/qr-encode" }
+qr-decode = { path = "crates/qr-decode" }
+qr-detect = { path = "crates/qr-detect" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

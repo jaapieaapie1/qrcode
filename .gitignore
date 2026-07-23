@@ -1,0 +1,4 @@
+target/
+*.png.tmp
+_temp/
+generated-images/
