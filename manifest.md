@@ -10,6 +10,6 @@ reviewer: Richard — REVIEWER.md
 
 ## Project
 handoff_dir: handoff/
-repo:
+repo: git@github.com:jaapieaapie1/qrcode.git
 branch: main
 context_file: CLAUDE.md
