@@ -14,6 +14,9 @@
 #![allow(dead_code)]
 
 use image::{DynamicImage, GrayImage, RgbaImage};
+use qr_core::micro::{
+    MicroEcLevel, MicroMode, MicroSymbolInfo, MicroVersion, micro_is_function_module,
+};
 use qr_core::{
     BitMatrix, EcBlocks, EcLevel, Mode, Version, ec_blocks, is_function_module, mask_bit,
 };
@@ -268,6 +271,142 @@ pub fn data_block_indices(b: EcBlocks) -> Vec<usize> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Micro QR (M1-M4)
+// ---------------------------------------------------------------------------
+
+/// Label for a micro symbol, e.g. `M1-detect`, `M2-L`, `M4-Q`.
+pub fn micro_label(info: &MicroSymbolInfo) -> String {
+    format!(
+        "M{}-{}",
+        info.version.number(),
+        match info.ec {
+            MicroEcLevel::Detection => "detect",
+            MicroEcLevel::L => "L",
+            MicroEcLevel::M => "M",
+            MicroEcLevel::Q => "Q",
+        }
+    )
+}
+
+/// The content kinds a micro version can carry (ISO Table 2): M1 is numeric
+/// only, M2 adds alphanumeric, M3 and M4 add byte.
+pub fn micro_content_kinds(version: MicroVersion) -> &'static [Content] {
+    match version {
+        MicroVersion::M1 => &[Content::Numeric],
+        MicroVersion::M2 => &[Content::Numeric, Content::Alphanumeric],
+        MicroVersion::M3 | MicroVersion::M4 => &ALL_CONTENT,
+    }
+}
+
+/// The micro mode a content kind is expected to be encoded in.
+pub fn micro_mode(kind: Content) -> MicroMode {
+    match kind {
+        Content::Numeric => MicroMode::Numeric,
+        Content::Alphanumeric => MicroMode::Alphanumeric,
+        Content::Binary | Content::Utf8 => MicroMode::Byte,
+    }
+}
+
+/// The largest number of characters of `mode` that fit in a micro symbol.
+///
+/// Independent of `qr-encode`'s private helpers: ISO 7.4.11 gives the micro data
+/// bit budget as mode indicator + character count + payload, with the
+/// terminator truncated away when the payload fills the symbol. The character
+/// count indicator's own range caps the result.
+pub fn micro_max_chars(mode: MicroMode, info: &MicroSymbolInfo) -> usize {
+    let version = info.version;
+    let Some((_, indicator_bits)) = mode.indicator(version) else {
+        return 0;
+    };
+    let Some(cc) = mode.char_count_bits(version) else {
+        return 0;
+    };
+    let avail = (info.data_bits as usize).saturating_sub(indicator_bits as usize + cc as usize);
+    let by_bits = match mode {
+        MicroMode::Numeric => {
+            let triples = avail / 10;
+            let rem = avail % 10;
+            triples * 3
+                + if rem >= 7 {
+                    2
+                } else if rem >= 4 {
+                    1
+                } else {
+                    0
+                }
+        }
+        MicroMode::Alphanumeric => {
+            let pairs = avail / 11;
+            let rem = avail % 11;
+            pairs * 2 + usize::from(rem >= 6)
+        }
+        MicroMode::Byte => avail / 8,
+        MicroMode::Kanji => 0,
+    };
+    by_bits.min((1usize << cc) - 1)
+}
+
+/// The order in which codeword bits occupy micro modules, per ISO 7.7.3.
+///
+/// Written independently of [`qr_core::micro::micro_data_modules`] (which the
+/// encoder and decoder share), so the two can be cross-checked. Micro symbols
+/// differ from QR in exactly two ways here: the vertical timing pattern sits in
+/// column 0 rather than column 6, so there is no mid-symbol column skip, and
+/// column 0 is never part of a two-module-wide pair.
+pub fn micro_data_module_order(version: MicroVersion) -> Vec<(u32, u32)> {
+    let size = version.size();
+    let mut out = Vec::with_capacity(version.data_modules() as usize);
+    let mut col = size as i32 - 1;
+    let mut upward = true;
+    while col >= 1 {
+        for k in 0..size {
+            let y = if upward { size - 1 - k } else { k };
+            for dx in 0..2u32 {
+                let x = col as u32 - dx;
+                if !micro_is_function_module(version, x, y) {
+                    out.push((x, y));
+                }
+            }
+        }
+        upward = !upward;
+        col -= 2;
+    }
+    out
+}
+
+/// `(bit offset, bit length)` of every codeword in the micro module stream:
+/// data codewords first (the last one 4 bits wide in M1 and M3), then error
+/// correction codewords, all 8 bits.
+pub fn micro_codeword_ranges(info: &MicroSymbolInfo) -> Vec<(usize, usize)> {
+    let mut out = Vec::with_capacity(info.total_codewords as usize);
+    let mut at = 0usize;
+    let data = info.data_codewords as usize;
+    for i in 0..data {
+        let len = if i + 1 == data {
+            info.final_data_codeword_bits() as usize
+        } else {
+            8
+        };
+        out.push((at, len));
+        at += len;
+    }
+    for _ in 0..info.ec_codewords {
+        out.push((at, 8));
+        at += 8;
+    }
+    out
+}
+
+/// Flips every module of one micro codeword, turning it into a guaranteed
+/// symbol error for Reed-Solomon.
+pub fn corrupt_micro_codeword(m: &mut BitMatrix, order: &[(u32, u32)], range: (usize, usize)) {
+    for &(x, y) in &order[range.0..range.0 + range.1] {
+        let v = m.get(x, y);
+        m.set(x, y, !v);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -5,9 +5,15 @@
 
 ## Current Status
 
-**Active step:** 3b — tests-integration (Bob-I building; final step)
-**Last cleared:** Waves 1+2+3a — all six crates committed, reviewed CLEAR: qr-core f8f74ab, qr-render 0ea46ed, qr-decode 6d8c31c, qr-detect 96b5bd4, qr-video 898ee1c, qr-encode 62c19b7
+**Active step:** Wave 4 — 5e under review (last step). Committed: 5a core 8fe1db5, 5c decode bcafb32, 5b encode 6d32f71, 5f r-cap 6174b10, 5d detect ba2f162. Cross-targets re-verified with micro on.
+**Last cleared:** Waves 1–3 complete + Step 4 detect fix (afa3d30) + CI (f13fa3a)
 **Pending deploy:** NO (local git only; no remote configured)
+
+Wave 4 decisions:
+- M1/M3 half-codeword: LOW nibble zero-prefixed into RS (ISO Annex N.1 precedent) — both sides aligned, EC difference pinned by test
+- Feature unification: in-workspace builds always carry qr-core/micro (cargo additivity); off-switch is for external consumers — accepted
+- MicroOptions has no forced-mode field — accepted gap
+- NEW from Richard-MD: QR decode path conformance defect — v1-L/M/Q/H, v2-L, v3-L must cap corrections at published r (< ec/2, ISO 7.5.1/Table 9 footnote a); current d/2 cap can return wrong payload as success. Step 5f.
 
 ---
 
@@ -96,6 +102,10 @@ See handoff/REVIEW-REQUEST.md for full detail. Ready for Richard.
 - **KG-8** — PARTIALLY CLOSED by Step 5a: qr-core micro foundation built behind the default-on `micro` feature (tables, format info, 4 masks, function map, placement iterator). Encode/decode/detect remain unsupported until Steps 5b–5d. Original entry: Micro QR (M1–M4) unsupported across all crates. ISO 18004:2024 includes it (sizes 9+2*M, single finder, own format-info/EC/mode tables; M1 numeric-only). Cleanly additive to current design; detect needs a single-finder algorithm. If built: `micro` cargo feature, parallel types (no shared Symbol enum). Awaiting Project Owner decision — logged 2026-07-23
 - **KG-9** — detect: rotation envelope for large versions at steep angles (v20/v40 fail 35–40°, pass 45°) is bounded by the module estimator's own +6–8% high bias in the mixed chord-taper regime (Richard-F measured; NOT a raster precision floor). Next lever: filter corner-tapered scanlines before averaging — logged 2026-07-23
 - **KG-10** — qr-detect not rustfmt-clean prior to Step 4; fmt applied in Step 4 commit — logged 2026-07-23
+- **KG-11** — binarize: single-window adaptive threshold at /8 radius trades vignette robustness (low-contrast frame corners) for large-module support; two-pass binarize (multi-scale) is the proper fix — logged 2026-08-10
+- **KG-12** — micro half-codeword nibble convention (low, zero-prefixed) rests on ISO Annex N.1 precedent; no worked M1/M3 ISO example exists — verify interop against an external reference decoder (zxing-cpp) when practical — logged 2026-08-10
+- **KG-13** — micro detect: a bridged timing module can truncate a symbol into a self-consistent smaller crop scoring 0 function mismatches (Richard-MT observation); rare, needs a discriminator beyond function-pattern validation — logged 2026-08-10
+- **KG-14** — micro detect: function_mismatches hardcodes the micro function map, tied to qr-core only by debug_assert — logged 2026-08-10
 
 ---
 
