@@ -357,8 +357,8 @@ impl VideoDetector {
 
         let box_w = (max_x - min_x).max(0.0);
         let box_h = (max_y - min_y).max(0.0);
-        let pad = (box_w.max(box_h) * self.cfg.roi_padding_frac)
-            .max(self.cfg.roi_padding_min_px as f64);
+        let pad =
+            (box_w.max(box_h) * self.cfg.roi_padding_frac).max(self.cfg.roi_padding_min_px as f64);
 
         let x0 = (min_x - pad).floor().max(0.0) as u32;
         let y0 = (min_y - pad).floor().max(0.0) as u32;

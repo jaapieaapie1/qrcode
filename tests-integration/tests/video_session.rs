@@ -100,13 +100,20 @@ fn session_enter_move_leave_reenter() {
     );
 
     // Every event refers to the same tracked payload.
-    assert_eq!(events[0].bytes.as_deref(), Some(PAYLOAD), "first sighting payload");
+    assert_eq!(
+        events[0].bytes.as_deref(),
+        Some(PAYLOAD),
+        "first sighting payload"
+    );
     assert_eq!(
         events[2].bytes.as_deref(),
         Some(PAYLOAD),
         "re-entry payload"
     );
-    assert_eq!(events[0].key, events[1].key, "Lost refers to the tracked key");
+    assert_eq!(
+        events[0].key, events[1].key,
+        "Lost refers to the tracked key"
+    );
     assert_eq!(
         events[0].text.as_deref(),
         Some("VIDEO-SESSION-2026"),
@@ -118,7 +125,10 @@ fn session_enter_move_leave_reenter() {
     // The code disappears after frame 5 (t = 500) and the default timeout is
     // 500 ms, so Lost lands on the first frame at t >= 1000.
     assert_eq!(events[0].timestamp_millis, 0, "first sighting on frame 0");
-    assert_eq!(events[1].timestamp_millis, 1000, "Lost after the 500 ms timeout");
+    assert_eq!(
+        events[1].timestamp_millis, 1000,
+        "Lost after the 500 ms timeout"
+    );
     assert_eq!(events[2].timestamp_millis, 1300, "re-entry on frame 13");
 
     let stats = det.stats();
@@ -132,8 +142,7 @@ fn session_enter_move_leave_reenter() {
         "repeat suppression should absorb the in-between sightings: {stats:?}"
     );
     assert_eq!(
-        stats.detections,
-        13,
+        stats.detections, 13,
         "13 frames contain the code: {stats:?}"
     );
     assert!(
@@ -202,7 +211,10 @@ fn code_at_top_left_border() {
 
     let (rx, ry, rw, rh) = det.active_roi().expect("ROI established");
     assert_eq!((rx, ry), (0, 0), "ROI must clamp at the top-left border");
-    assert!(rx + rw <= w && ry + rh <= h, "ROI must stay inside the frame");
+    assert!(
+        rx + rw <= w && ry + rh <= h,
+        "ROI must stay inside the frame"
+    );
 
     // The next frame is scanned through that clamped ROI and must still hit.
     let g2 = frame_at(w, h, &code, Some((0, 0)));
@@ -227,7 +239,11 @@ fn code_at_bottom_right_border() {
 
     let mut det = VideoDetector::with_defaults();
     let events = det.process_frame(Frame::new(&g.px, g.w, g.h, 0));
-    assert_eq!(events.len(), 1, "code at the bottom-right border must be found");
+    assert_eq!(
+        events.len(),
+        1,
+        "code at the bottom-right border must be found"
+    );
 
     let (rx, ry, rw, rh) = det.active_roi().expect("ROI established");
     assert_eq!(rx + rw, w, "ROI must clamp at the right edge");
@@ -273,7 +289,10 @@ fn full_scan_refresh_follows_configured_cadence() {
     let stats = det.stats();
     // Frame 1 has no ROI yet; frames 3, 6 and 9 are cadence refreshes.
     assert_eq!(stats.full_scans, 4, "cadence refreshes: {stats:?}");
-    assert_eq!(stats.roi_scans, 5, "remaining frames use the ROI: {stats:?}");
+    assert_eq!(
+        stats.roi_scans, 5,
+        "remaining frames use the ROI: {stats:?}"
+    );
     assert_eq!(stats.roi_hits, 5, "stationary code always hits: {stats:?}");
     assert_eq!(stats.roi_misses, 0, "{stats:?}");
     assert_eq!(stats.roi_fallbacks, 0, "{stats:?}");
@@ -299,7 +318,10 @@ fn full_scan_refresh_zero_disables_periodic_rescan() {
 
     let stats = det.stats();
     assert_eq!(stats.full_scans, 1, "only the very first frame: {stats:?}");
-    assert_eq!(stats.roi_scans, 5, "every later frame stays in ROI: {stats:?}");
+    assert_eq!(
+        stats.roi_scans, 5,
+        "every later frame stays in ROI: {stats:?}"
+    );
     assert_eq!(stats.roi_hits, 5, "{stats:?}");
 }
 

@@ -22,6 +22,19 @@ pub struct Finder {
 /// Checks whether five consecutive run lengths match `1:1:3:1:1`.
 ///
 /// Returns the estimated module size on success.
+///
+/// The estimate is the mean of the four *single-module* runs, not `total / 7`.
+/// A scanline crossing the finder off-centre clips the 3-module core — the
+/// chord through the concentric rings shortens with the offset — while the
+/// single-module runs are differences of two such chords, so much of the
+/// offset error cancels. The cancellation is not exact in the mixed regime:
+/// the chord taper sets in at a radius proportional to each ring, so the
+/// 1.5-module core tapers before the 3.5-module ring and the residual biases
+/// the estimate *high* by up to ~8% around 35-40 degrees (vanishing at 0 and
+/// 45). That beats `total / 7`, which under-reports by >12% toward 45 degrees,
+/// and the high bias is the current accuracy limit for large versions at
+/// steep angles. `total / 7` remains the right reference for the *shape* test
+/// below, which is what the `1:1:3:1:1` ratio is stated against.
 fn matches_ratio(runs: [f64; 5]) -> Option<f64> {
     let total: f64 = runs.iter().sum();
     if total < 7.0 {
@@ -35,7 +48,7 @@ fn matches_ratio(runs: [f64; 5]) -> Option<f64> {
         && (runs[3] - module).abs() < max_var
         && (runs[4] - module).abs() < max_var
     {
-        Some(module)
+        Some((runs[0] + runs[1] + runs[3] + runs[4]) / 4.0)
     } else {
         None
     }
@@ -86,10 +99,10 @@ fn vertical_check(bin: &Binary, x: i64, y: i64, est_module: f64) -> Option<(f64,
         yy += 1;
     }
 
-    matches_ratio([c0, c1, c2, c3, c4])?;
+    let module = matches_ratio([c0, c1, c2, c3, c4])?;
     // Centre of the middle dark band.
     let center = (top_dark_edge as f64 + bottom_dark_edge as f64) / 2.0;
-    Some((center, (c0 + c1 + c2 + c3 + c4) / 7.0))
+    Some((center, module))
 }
 
 /// Refines the horizontal centre by walking left/right through the centre dark

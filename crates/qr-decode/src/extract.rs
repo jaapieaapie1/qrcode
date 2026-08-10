@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use qr_core::bch::{format_info_decode, version_info_decode};
 use qr_core::reed_solomon::rs_correct;
-use qr_core::{ec_blocks, is_function_module, mask_bit, BitMatrix, EcLevel, Version};
+use qr_core::{BitMatrix, EcLevel, Version, ec_blocks, is_function_module, mask_bit};
 
 use crate::DecodeError;
 

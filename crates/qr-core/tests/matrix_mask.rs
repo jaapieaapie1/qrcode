@@ -1,6 +1,6 @@
 //! BitMatrix storage and mask-predicate sanity checks.
 
-use qr_core::{mask_bit, BitMatrix};
+use qr_core::{BitMatrix, mask_bit};
 
 #[test]
 fn bitmatrix_get_set() {

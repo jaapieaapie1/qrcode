@@ -109,17 +109,7 @@ impl PerspectiveTransform {
         let dy3 = y0 - y1 + y2 - y3;
         if dx3.abs() < f64::EPSILON && dy3.abs() < f64::EPSILON {
             // Affine special case (the mapped quad is a parallelogram).
-            PerspectiveTransform::new9(
-                x1 - x0,
-                x2 - x1,
-                x0,
-                y1 - y0,
-                y2 - y1,
-                y0,
-                0.0,
-                0.0,
-                1.0,
-            )
+            PerspectiveTransform::new9(x1 - x0, x2 - x1, x0, y1 - y0, y2 - y1, y0, 0.0, 0.0, 1.0)
         } else {
             let dx1 = x1 - x2;
             let dx2 = x3 - x2;

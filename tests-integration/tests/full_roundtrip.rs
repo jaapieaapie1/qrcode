@@ -27,7 +27,10 @@ fn assert_same_matrix(got: &BitMatrix, want: &BitMatrix, label: &str) {
             }
         }
     }
-    assert_eq!(mismatches, 0, "{label}: {mismatches} sampled module mismatches");
+    assert_eq!(
+        mismatches, 0,
+        "{label}: {mismatches} sampled module mismatches"
+    );
 }
 
 /// Encodes a capacity-filling payload, renders it, detects it and decodes it,
@@ -69,7 +72,10 @@ fn roundtrip(v: u8, ec: EcLevel, kind: Content, scale: u32, mask: Option<u8>) {
     if let Some(m) = mask {
         assert_eq!(decoded.mask, m, "{label}: mask");
     }
-    assert_eq!(decoded.errors_corrected, 0, "{label}: clean render needs no RS repair");
+    assert_eq!(
+        decoded.errors_corrected, 0,
+        "{label}: clean render needs no RS repair"
+    );
 }
 
 /// Full EC x content cross product for one version.

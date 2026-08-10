@@ -1,9 +1,9 @@
 //! Format- and version-information BCH roundtrip and bit-error correction.
 
+use qr_core::EcLevel;
 use qr_core::bch::{
     format_info_decode, format_info_encode, version_info_decode, version_info_encode,
 };
-use qr_core::EcLevel;
 
 #[test]
 fn format_info_roundtrip_all() {

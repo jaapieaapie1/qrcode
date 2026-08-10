@@ -12,9 +12,9 @@
 
 use qr_core::bch::{format_info_encode, version_info_encode};
 use qr_core::reed_solomon::rs_encode;
-use qr_core::{ec_blocks, is_function_module, mask_bit, BitMatrix, EcLevel, Mode, Version};
+use qr_core::{BitMatrix, EcLevel, Mode, Version, ec_blocks, is_function_module, mask_bit};
 
-use qr_decode::{decode, DecodeError};
+use qr_decode::{DecodeError, decode};
 
 // ----- fixture construction -------------------------------------------------
 

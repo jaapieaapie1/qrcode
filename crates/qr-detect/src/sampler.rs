@@ -42,8 +42,8 @@ pub fn sample(bin: &Binary, cand: &QrCandidate) -> Option<Sampled> {
     );
 
     // Refine the fourth correspondence with an alignment pattern for v >= 2.
-    let (g_br, img_br) = refine_alignment(bin, version, &provisional)
-        .unwrap_or((g_br_default, bottom_right));
+    let (g_br, img_br) =
+        refine_alignment(bin, version, &provisional).unwrap_or((g_br_default, bottom_right));
 
     let transform = PerspectiveTransform::quad_to_quad(
         [g_tl, g_tr, g_br, g_bl],

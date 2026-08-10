@@ -7,8 +7,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::gf;
 use crate::Error;
+use crate::gf;
 
 /// Builds the Reed-Solomon generator polynomial of degree `ec_len`.
 ///

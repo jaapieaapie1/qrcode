@@ -26,7 +26,11 @@ fn generator_poly_10_matches_iso_exponents() {
 #[test]
 fn iso_annex_i_known_vector() {
     let ec = rs_encode(&V1M_DATA, 10);
-    assert_eq!(ec.as_slice(), &V1M_EC, "EC codewords do not match ISO Annex I");
+    assert_eq!(
+        ec.as_slice(),
+        &V1M_EC,
+        "EC codewords do not match ISO Annex I"
+    );
 }
 
 #[test]

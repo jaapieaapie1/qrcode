@@ -179,7 +179,14 @@ struct MovingQrSource {
 }
 
 impl MovingQrSource {
-    fn new(tile: Tile, canvas_w: u32, canvas_h: u32, start: (u32, u32), step: u32, count: u32) -> MovingQrSource {
+    fn new(
+        tile: Tile,
+        canvas_w: u32,
+        canvas_h: u32,
+        start: (u32, u32),
+        step: u32,
+        count: u32,
+    ) -> MovingQrSource {
         MovingQrSource {
             canvas: Canvas::new(canvas_w, canvas_h),
             tile,
@@ -251,7 +258,10 @@ fn roi_tracking_engages_after_first_hit() {
     assert_eq!(o0.len(), 1, "frame 0 should report one FirstSeen");
     assert_eq!(o0[0].kind, EventKind::FirstSeen);
     assert!(!o0[0].via_roi, "frame 0 is a full-frame scan");
-    assert!(det.active_roi().is_some(), "an ROI must be armed after a hit");
+    assert!(
+        det.active_roi().is_some(),
+        "an ROI must be armed after a hit"
+    );
     let s0 = det.stats();
     assert_eq!(s0.full_scans, 1);
     assert_eq!(s0.roi_scans, 0);
@@ -337,11 +347,7 @@ fn lost_then_refound_is_reported() {
 
     assert_eq!(
         kinds,
-        vec![
-            EventKind::FirstSeen,
-            EventKind::Lost,
-            EventKind::FirstSeen,
-        ],
+        vec![EventKind::FirstSeen, EventKind::Lost, EventKind::FirstSeen,],
         "expected FirstSeen -> Lost -> FirstSeen, got {kinds:?}"
     );
     let s = det.stats();

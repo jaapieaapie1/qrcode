@@ -57,19 +57,11 @@ fn rotated_20_degrees() {
 /// is out of Step 3b's scope.
 ///
 /// `qr_detect::grouping::score_triple` derives the symbol dimension as
-/// `leg / module + 7`, where `leg` is the (rotation-invariant) finder
-/// centre-to-centre distance but `module` comes from `Finder.module`, measured
-/// as horizontal/vertical scanline run lengths. For a symbol rotated by `θ`
-/// those runs are stretched by `1 / cos θ`, so the dimension estimate is short
-/// by `(dimension - 7) * (1 - cos θ)` modules. `snap_dimension` tolerates about
-/// two modules of error, so detection silently returns a *smaller* valid
-/// version and the decode fails.
-///
-/// Measured breakdown angle (rendered at 10 px/module, `θ` folded into
-/// `0..=45`): v1 34 deg, v2 30, v3 27, v4 25, v5 23, v7 20, v10 17, v15 14,
-/// v20 12 — matching `(dimension - 7) * (1 - cos θ) ≈ 2` exactly.
+/// Was bug CI-1: the dimension estimate mixed a rotation-invariant finder leg
+/// with an axis-aligned (rotation-stretched) module estimate, undershooting by
+/// `(dimension - 7) * (1 - cos θ)` and snapping to a smaller valid version.
+/// Fixed in Step 4 by `axis_scale` correction in `qr-detect::grouping`.
 #[test]
-#[ignore = "CI-1: qr-detect dimension estimate is not rotation-corrected"]
 fn rotated_30_degrees() {
     let g = pad(&base(EcLevel::M, None, 8, 4), 130);
     let r = rotate(&g, std::f64::consts::FRAC_PI_6);
@@ -78,18 +70,11 @@ fn rotated_30_degrees() {
 
 /// A single rotated symbol must yield exactly one candidate.
 ///
-/// IGNORED — genuine cross-crate defect **CI-2**, reported in
-/// `handoff/REVIEW-REQUEST-integration.md`. Under rotation
-/// `qr_detect::grouping::group` can emit a second, phantom candidate built from
-/// the same three finder patterns but snapped to a smaller dimension, so
-/// `detect()` returns a non-decodable extra `Detection`. `read_one` is immune
-/// (it prefers a detection that decoded), but anything counting detections —
-/// including `qr_video::Stats::detections` — over-counts.
-///
-/// Repro: v7-M, 10 px/module, 200 px pad, 20 deg -> `sizes = [45, 21]`;
-/// 22 deg -> `sizes = [41, 29]`.
+/// Was bug CI-2: weak finder clusters from alignment patterns and data runs
+/// could form a phantom nested candidate inside the real symbol
+/// (v7-M @20 deg -> `sizes = [45, 21]`). Fixed in Step 4 by the nested-triple
+/// rejection in `qr-detect::grouping`.
 #[test]
-#[ignore = "CI-2: qr-detect emits phantom extra candidates under rotation"]
 fn single_rotated_symbol_yields_single_candidate() {
     let mut opts = Options::new(EcLevel::M);
     opts.version = Some(common::ver(7));
@@ -100,28 +85,6 @@ fn single_rotated_symbol_yields_single_candidate() {
         qr_detect::detect(&r.to_image()).len(),
         1,
         "one symbol in the image should give one candidate"
-    );
-}
-
-/// Pins the *shape* of CI-1 so a future fix is detected: at 30 degrees the
-/// detector still finds a symbol, but reports a smaller-than-actual dimension.
-/// Delete this test together with the `#[ignore]` above once CI-1 is fixed.
-#[test]
-fn rotation_dimension_underestimate_is_still_present() {
-    let mut opts = Options::new(EcLevel::M);
-    opts.version = Some(common::ver(5));
-    let m = encode(PAYLOAD, opts).expect("encode v5 fixture");
-    let g = pad(&render_gray(&m, 10, 5), 200);
-    let r = rotate(&g, std::f64::consts::FRAC_PI_6);
-
-    let dets = qr_detect::detect(&r.to_image());
-    assert_eq!(dets.len(), 1, "a symbol is still located at 30 degrees");
-    assert!(
-        dets[0].matrix.size() < m.size(),
-        "CI-1 appears fixed: sampled dimension {} now matches the true {} — \
-         drop this test and un-ignore rotated_30_degrees",
-        dets[0].matrix.size(),
-        m.size()
     );
 }
 

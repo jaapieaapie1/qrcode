@@ -66,7 +66,10 @@ fn sweep(kind: Content) {
             assert_eq!(decoded.version.number(), n, "version readback");
             assert_eq!(decoded.ec, ec, "ec readback");
             assert!(decoded.mask <= 7, "mask readback in range");
-            assert_eq!(decoded.errors_corrected, 0, "clean symbol needs no correction");
+            assert_eq!(
+                decoded.errors_corrected, 0,
+                "clean symbol needs no correction"
+            );
         }
     }
 }
@@ -126,7 +129,10 @@ fn all_masks_roundtrip_at_matrix_level() {
     for n in [1u8, 3, 7, 14, 27, 40] {
         let v = ver(n);
         for ec in ALL_EC {
-            let data = payload(Content::Binary, 24.min(max_chars(qr_core::Mode::Byte, v, ec)));
+            let data = payload(
+                Content::Binary,
+                24.min(max_chars(qr_core::Mode::Byte, v, ec)),
+            );
             for mask in 0..8u8 {
                 let mut opts = Options::new(ec);
                 opts.version = Some(v);
@@ -213,7 +219,10 @@ fn multi_block_corruption_is_corrected_v5_q() {
     );
     let t = blocks.ec_per_block as usize / 2;
 
-    let data = payload(Content::Binary, max_chars(qr_core::Mode::Byte, v, EcLevel::Q));
+    let data = payload(
+        Content::Binary,
+        max_chars(qr_core::Mode::Byte, v, EcLevel::Q),
+    );
     let mut opts = Options::new(EcLevel::Q);
     opts.version = Some(v);
     let mut m = encode(&data, opts).expect("encode v5-Q");
@@ -241,7 +250,8 @@ fn multi_block_corruption_is_corrected_v5_q() {
     let d = decode(&m).expect("v5-Q multi-block corruption should be recoverable");
     assert_eq!(d.bytes, data, "payload must survive multi-block correction");
     assert_eq!(
-        d.errors_corrected, corrupt_count,
+        d.errors_corrected,
+        corrupt_count,
         "expected {corrupt_count} corrected codewords across {} blocks",
         blocks.total_blocks()
     );
@@ -278,7 +288,10 @@ fn beyond_correction_capacity_fails_cleanly_v5_q() {
     let blocks = ec_blocks(v, EcLevel::Q);
     let t = blocks.ec_per_block as usize / 2;
 
-    let data = payload(Content::Binary, max_chars(qr_core::Mode::Byte, v, EcLevel::Q));
+    let data = payload(
+        Content::Binary,
+        max_chars(qr_core::Mode::Byte, v, EcLevel::Q),
+    );
     let mut opts = Options::new(EcLevel::Q);
     opts.version = Some(v);
     let mut m = encode(&data, opts).expect("encode v5-Q");
@@ -294,7 +307,11 @@ fn beyond_correction_capacity_fails_cleanly_v5_q() {
         .map(|(i, _)| i)
         .take(t + 1)
         .collect();
-    assert_eq!(targets.len(), t + 1, "block 0 must hold more than t codewords");
+    assert_eq!(
+        targets.len(),
+        t + 1,
+        "block 0 must hold more than t codewords"
+    );
     for i in targets {
         corrupt_codeword(&mut m, &order, i);
     }

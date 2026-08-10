@@ -58,7 +58,11 @@ fn fuzz_case(rng: &mut Rng, iteration: usize) {
         ec_label(ec),
         kind.label()
     );
-    assert_eq!(d.version.number(), version.number(), "iter {iteration}: version");
+    assert_eq!(
+        d.version.number(),
+        version.number(),
+        "iter {iteration}: version"
+    );
     assert_eq!(d.ec, ec, "iter {iteration}: ec");
     assert_eq!(d.errors_corrected, 0, "iter {iteration}: clean symbol");
 }
@@ -103,7 +107,12 @@ fn fuzz_degenerate_payloads() {
         for byte in [0x00u8, 0x0A, 0x7F, 0xFF] {
             let m = encode(&[byte], Options::new(ec)).expect("encode single byte");
             let d = decode(&m).expect("decode single byte");
-            assert_eq!(d.bytes, vec![byte], "single byte {byte:#04x} at {}", ec_label(ec));
+            assert_eq!(
+                d.bytes,
+                vec![byte],
+                "single byte {byte:#04x} at {}",
+                ec_label(ec)
+            );
         }
     }
 }

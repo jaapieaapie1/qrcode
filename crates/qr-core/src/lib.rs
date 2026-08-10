@@ -41,7 +41,7 @@ mod mode;
 mod version;
 
 pub use bitmatrix::BitMatrix;
-pub use blocks::{ec_blocks, EcBlocks};
+pub use blocks::{EcBlocks, ec_blocks};
 pub use ec::EcLevel;
 pub use function::is_function_module;
 pub use mask::mask_bit;

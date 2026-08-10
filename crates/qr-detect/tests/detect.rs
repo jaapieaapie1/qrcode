@@ -172,6 +172,18 @@ fn rotate(src: &Gray, angle: f64) -> Gray {
     out
 }
 
+/// Widens `src` with `px` pixels of white on every side, so that a rotation
+/// about the centre cannot push the symbol off the canvas.
+fn pad(src: &Gray, px: u32) -> Gray {
+    let mut out = Gray::new(src.w + 2 * px, src.h + 2 * px, 255);
+    for y in 0..src.h {
+        for x in 0..src.w {
+            out.set(x + px, y + px, src.px[(y * src.w + x) as usize]);
+        }
+    }
+    out
+}
+
 /// Applies a projective warp given by four destination corners of the source
 /// rectangle `(0,0)-(w,h)`. Uses inverse mapping via a solved homography.
 fn perspective(src: &Gray, dst_corners: [(f64, f64); 4], out_w: u32, out_h: u32) -> Gray {
@@ -215,7 +227,10 @@ fn homography(from: [(f64, f64); 4], to: [(f64, f64); 4]) -> [f64; 9] {
 
 fn apply_h(h: &[f64; 9], x: f64, y: f64) -> (f64, f64) {
     let w = h[6] * x + h[7] * y + h[8];
-    ((h[0] * x + h[1] * y + h[2]) / w, (h[3] * x + h[4] * y + h[5]) / w)
+    (
+        (h[0] * x + h[1] * y + h[2]) / w,
+        (h[3] * x + h[4] * y + h[5]) / w,
+    )
 }
 
 /// Gaussian elimination with partial pivoting for an 8x8 system.
@@ -337,6 +352,74 @@ fn rotated_larger_angle() {
     let g = render(&m, 10, 6);
     let r = rotate(&g, 0.35); // ~20 degrees
     assert_recovers(&r, &m, "rotated 20deg");
+}
+
+// ---------------------------------------------------------------------------
+// Rotation matrix
+//
+// `Finder.module` is measured from axis-aligned scanline runs, so it is
+// stretched by `1 / max(|cos θ|, |sin θ|)` under rotation while the
+// finder-to-finder legs are not. Before `grouping::axis_scale` corrected for
+// that, the dimension estimate fell short by `(dimension - 7) * (1 - cos θ)`
+// and the detector silently snapped to a *smaller* valid version. The envelope
+// shrank as the version grew: v5 broke at 23 degrees, v7 at 20, v10 at 17,
+// v20 at 12. Each case below sat outside that envelope.
+// ---------------------------------------------------------------------------
+
+/// Renders `version`, pads it so no corner can be clipped, rotates by `degrees`
+/// and requires the sampled grid to match module-for-module.
+fn assert_recovers_rotated(version: u8, scale: u32, degrees: f64) {
+    let m = synth_matrix(version);
+    let g = render(&m, scale, 4);
+    // A rotation about the centre needs `(sqrt(2) - 1) / 2` of the side on each
+    // edge to stay clear of the canvas at any angle.
+    let g = pad(&g, g.w * 3 / 10);
+    let r = rotate(&g, degrees.to_radians());
+    assert_recovers(&r, &m, &format!("v{version} rotated {degrees}deg"));
+}
+
+#[test]
+fn rotated_v5_25deg() {
+    assert_recovers_rotated(5, 10, 25.0);
+}
+
+#[test]
+fn rotated_v5_30deg() {
+    assert_recovers_rotated(5, 10, 30.0);
+}
+
+#[test]
+fn rotated_v7_20deg() {
+    assert_recovers_rotated(7, 10, 20.0);
+}
+
+#[test]
+fn rotated_v10_17deg() {
+    assert_recovers_rotated(10, 8, 17.0);
+}
+
+#[test]
+fn rotated_v20_15deg() {
+    assert_recovers_rotated(20, 8, 15.0);
+}
+
+/// The correction folds at 45 degrees, so the worst case for a large symbol is
+/// the middle of the range rather than either end.
+#[test]
+fn rotated_v10_40deg() {
+    assert_recovers_rotated(10, 8, 40.0);
+}
+
+#[test]
+fn rotated_v5_45deg() {
+    assert_recovers_rotated(5, 10, 45.0);
+}
+
+/// Past 45 degrees the axis-aligned measurement folds back; a symbol at 60
+/// degrees must behave like one at 30.
+#[test]
+fn rotated_v5_60deg() {
+    assert_recovers_rotated(5, 10, 60.0);
 }
 
 #[test]

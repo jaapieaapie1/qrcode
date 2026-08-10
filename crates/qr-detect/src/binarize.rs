@@ -95,8 +95,7 @@ fn adaptive(luma: &[u8], width: u32, height: u32) -> Binary {
             let x1 = ((x as i64 + radius) as usize).min(w - 1);
             let y1 = ((y as i64 + radius) as usize).min(h - 1);
             let count = ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
-            let sum = integral[(y1 + 1) * stride + (x1 + 1)]
-                + integral[y0 * stride + x0]
+            let sum = integral[(y1 + 1) * stride + (x1 + 1)] + integral[y0 * stride + x0]
                 - integral[y0 * stride + (x1 + 1)]
                 - integral[(y1 + 1) * stride + x0];
             let value = luma[y * w + x] as u64;

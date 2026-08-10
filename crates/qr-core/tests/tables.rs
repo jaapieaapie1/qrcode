@@ -2,7 +2,7 @@
 //! geometric cross-check that the function-pattern map agrees with the codeword
 //! counts.
 
-use qr_core::{ec_blocks, is_function_module, EcLevel, Version};
+use qr_core::{EcLevel, Version, ec_blocks, is_function_module};
 
 #[test]
 fn block_sums_match_total_codewords() {

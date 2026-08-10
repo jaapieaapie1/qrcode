@@ -14,7 +14,9 @@
 #![allow(dead_code)]
 
 use image::{DynamicImage, GrayImage, RgbaImage};
-use qr_core::{BitMatrix, EcBlocks, EcLevel, Mode, Version, ec_blocks, is_function_module, mask_bit};
+use qr_core::{
+    BitMatrix, EcBlocks, EcLevel, Mode, Version, ec_blocks, is_function_module, mask_bit,
+};
 
 // ---------------------------------------------------------------------------
 // Versions / EC levels
@@ -160,7 +162,14 @@ pub fn max_chars(mode: Mode, version: Version, ec: EcLevel) -> usize {
         Mode::Numeric => {
             let triples = avail / 10;
             let rem = avail % 10;
-            triples * 3 + if rem >= 7 { 2 } else if rem >= 4 { 1 } else { 0 }
+            triples * 3
+                + if rem >= 7 {
+                    2
+                } else if rem >= 4 {
+                    1
+                } else {
+                    0
+                }
         }
         Mode::Alphanumeric => {
             let pairs = avail / 11;
@@ -365,7 +374,11 @@ pub fn rotate(src: &Gray, angle: f64) -> Gray {
         for x in 0..src.w {
             let dx = x as f64 - cx;
             let dy = y as f64 - cy;
-            out.set(x, y, src.sample(cx + dx * c + dy * s, cy - dx * s + dy * c, 255));
+            out.set(
+                x,
+                y,
+                src.sample(cx + dx * c + dy * s, cy - dx * s + dy * c, 255),
+            );
         }
     }
     out
@@ -377,7 +390,11 @@ pub fn rotate_quarters(src: &Gray, quarters: u32) -> Gray {
     if q == 0 {
         return src.clone();
     }
-    let (ow, oh) = if q == 2 { (src.w, src.h) } else { (src.h, src.w) };
+    let (ow, oh) = if q == 2 {
+        (src.w, src.h)
+    } else {
+        (src.h, src.w)
+    };
     let mut out = Gray::new(ow, oh, 255);
     for y in 0..src.h {
         for x in 0..src.w {
@@ -530,7 +547,11 @@ impl Rng {
     /// Creates a generator; a zero seed is replaced (xorshift has no escape
     /// from the all-zero state).
     pub fn new(seed: u64) -> Rng {
-        Rng(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
+        Rng(if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        })
     }
 
     /// Next 64-bit value.

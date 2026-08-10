@@ -97,7 +97,9 @@ impl Options {
     /// zones). Quiet zone saturates rather than overflowing.
     #[inline]
     fn modules_side(self, matrix: &BitMatrix) -> u32 {
-        matrix.size().saturating_add(self.quiet_zone.saturating_mul(2))
+        matrix
+            .size()
+            .saturating_add(self.quiet_zone.saturating_mul(2))
     }
 }
 
