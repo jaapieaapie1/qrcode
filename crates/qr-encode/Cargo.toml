@@ -5,3 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+qr-core = { workspace = true }
+
+[dev-dependencies]
+# Independent decoder used only by tests/roundtrip.rs to cross-check that the
+# encoder's zigzag placement, masking, format/version info and interleaving are
+# geometrically correct (not merely self-consistent with the encoder's own
+# extraction). Added by review (Richard-E) — see REVIEW-FEEDBACK-encode.md.
+qr-decode = { workspace = true }
