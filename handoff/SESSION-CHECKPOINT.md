@@ -1,28 +1,34 @@
-# Session Checkpoint — 2026-07-23
+# Session Checkpoint — 2026-08-10
 *Read this before reading anything else. If it covers current state, skip BUILD-LOG.*
 
 ---
 
 ## Where We Stopped
 
-First-time setup complete. Project Owner will define project scope in next prompt — building from scratch. No code exists yet.
+Full stack built, reviewed, committed (through afa3d30). All six crates +
+tests-integration green: `cargo test --workspace` 29 suites pass, clippy clean,
+fmt clean. Cross-target verified: no_std trio on thumbv7em + riscv32imc (ESP32-C3
+class), all crates on wasm32. Goal from Project Owner satisfied; awaiting next
+direction.
 
 ---
 
 ## What Was Decided This Session
 
-- Team names kept as defaults: Arch (Architect), Bob (Builder), Richard (Reviewer)
-- RTK installed and verified (rtk 0.43.0)
-- Agent models: Bob = Opus, Richard = Opus, Arch = session model (Fable)
-- CLAUDE.md created as context file (Project section pending scope)
-- manifest.md created at v1.3.0
-
----
+- Six-crate layout + tests-integration; waves: core → (encode|decode|render|detect parallel) → (video|integration) → detect-fix
+- N3 penalty: score-once per pattern (ISO Table 11 NOTE 3, verified from spec text; Nayuki per-side deviates)
+- Detect: 2D 5×5 alignment template match (scanline method unreliable); axis_scale rotation correction; nested-phantom triple rejection
+- Video: lending FrameSource (`next_frame(&mut self) -> Option<Frame<'_>>`), no capture dep, qr-detect decode feature pinned
+- Multiscan is core detect behavior (Vec<Detection>), covered in tests-integration/tests/multiscan.rs
+- Micro QR: NOT built; if ordered → `micro` feature, parallel types, default-on scan side (KG-8)
 
 ## Still Open
 
-- Project scope — Project Owner to define what we are building
-- CLAUDE.md Project section to be filled once scope is known
+- KG-8 Micro QR decision (Project Owner)
+- KG-4 Kanji SJIS→UTF-8, structured append reassembly
+- KG-6 encoder mixed-mode segmentation, Kanji/ECI encode
+- KG-7/KG-9 detect: full alignment grid for severe perspective; estimator bias 35–40° for v20+
+- No git remote / CI. CI could enforce the 4 verified targets.
 
 ---
 
