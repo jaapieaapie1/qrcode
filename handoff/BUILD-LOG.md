@@ -5,9 +5,9 @@
 
 ## Current Status
 
-**Active step:** Step 7 (esp-selftest, QEMU riscv32 execution in CI) — CLEAR, round-2 fixes applied, ready for Arch to push. Wave 4 COMPLETE. 5a core 8fe1db5, 5c decode bcafb32, 5b encode 6d32f71, 5f r-cap 6174b10, 5d detect ba2f162 (round-2 after BLOCKED), 5e integration 2497114, CI f13fa3a. Workspace green both configs, cross-targets green.
+**Active step:** none — Step 7 COMPLETE (esp-selftest committed, esp32-emulation CI job green on GitHub in 54s: run 31439384048).
 **Last cleared:** Waves 1–3 complete + Step 4 detect fix (afa3d30) + CI (f13fa3a)
-**Pending deploy:** NO (local git only; no remote configured)
+**Pending deploy:** NO — remote github.com/jaapieaapie1/qrcode (private), CI green incl. esp32-emulation
 
 Wave 4 decisions:
 - M1/M3 half-codeword: LOW nibble zero-prefixed into RS (ISO Annex N.1 precedent) — both sides aligned, EC difference pinned by test
