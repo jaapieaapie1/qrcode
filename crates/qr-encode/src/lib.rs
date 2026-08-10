@@ -17,6 +17,14 @@
 //! Single-mode segmentation only (numeric / alphanumeric / byte auto-selected
 //! for the whole payload). Mixed-mode segmentation, Kanji and ECI are not
 //! implemented — see the crate Known Gaps.
+//!
+//! # Features
+//!
+//! `micro` (default) adds the Micro QR encoder in the `micro` module:
+//! `encode_micro`, `MicroOptions` and `MicroEncodeError`, parallel to
+//! [`encode`], [`Options`] and [`EncodeError`]. Opt out with
+//! `--no-default-features`; the QR path is unaffected either way. The names are
+//! written unlinked here because they do not exist when the feature is off.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -29,6 +37,12 @@ extern crate std;
 mod bits;
 mod matrix;
 mod segment;
+
+#[cfg(feature = "micro")]
+pub mod micro;
+
+#[cfg(feature = "micro")]
+pub use micro::{MicroEncodeError, MicroOptions, encode_micro};
 
 use alloc::vec::Vec;
 use bits::BitBuffer;

@@ -7,6 +7,15 @@ license.workspace = true
 [dependencies]
 qr-core = { workspace = true }
 
+[features]
+# `micro` adds the ISO/IEC 18004:2024 Micro QR encoder (`encode_micro`) in the
+# `micro` module, forwarding the feature of the same name to qr-core. On by
+# default; opt out with `--no-default-features`. The polarity is identical in
+# every crate of the workspace and nothing pins `default-features = false` on a
+# sibling, so feature unification stays additive.
+default = ["micro"]
+micro = ["qr-core/micro"]
+
 [dev-dependencies]
 # Independent decoder used only by tests/roundtrip.rs to cross-check that the
 # encoder's zigzag placement, masking, format/version info and interleaving are
