@@ -68,6 +68,48 @@ Workspace member `tests-integration` (dev-only): encode→render→rasterize→d
 
 ---
 
+# Wave 4 — Micro QR (Steps 5a–5e). ISO 18004:2024 Micro QR symbology.
+
+Locked design decisions (Architect + Project Owner):
+- Cargo feature `micro`, DEFAULT-ON, one polarity everywhere: qr-core defines it; qr-encode/qr-decode/qr-detect forward it (`micro = ["qr-core/micro"]` etc.). Opt-out via `default-features = false`. Nothing in the dependency chain may set `default-features = false` on a sibling (feature additivity — qr-video keeps its explicit `features = ["decode"]` pin).
+- PARALLEL TYPES, not shared enums: `MicroVersion` (M1–M4), `encode_micro()`, `decode_micro()`, `DecodedMicro` (or clearly-named equivalents). Existing public signatures MUST NOT change; no new variants on existing public enums. qr-render needs zero changes (BitMatrix in, pixels out). qr-video inherits detection via qr-detect.
+- All micro items live in `micro`-gated modules; crates must build cleanly with `--no-default-features` (minus micro) AND with it on. Both configs in every DoD.
+- Reference: ISO PDF at repo root. Micro spec spread through the main clauses (symbol sizes 11/13/15/17; single finder; timing row 0 / col 0; format info BCH(15,5) XOR mask 0x4445 with 3-bit symbol number + 2-bit data mask; 4 micro data-mask patterns; modes M1 numeric-only no indicator, M2 1-bit, M3 2-bit, M4 3-bit indicators; short terminators; M1/M3 final 4-bit half codeword; EC: M1 error-detection-only 2 ec cw, M2/M3 L+M, M4 L/M/Q). VERIFY every table against the PDF — do not trust memory; page-targeted reads.
+
+## Step 5a — qr-core micro foundation (blocks 5b–5d)
+In `crates/qr-core/src/micro.rs` (feature-gated), reusing gf/rs/bitmatrix untouched:
+- `MicroVersion` M1–M4: size 9+2*n, symbol capacity tables (total/data/ec codewords per version×level incl. M1 detection-only), allowed `EcLevel` subsets, mode availability, char-count widths, terminator lengths.
+- Micro format info: BCH(15,5) reuse, XOR mask 0x4445, symbol-number encoding table ((version, ec) ↔ 3-bit symbol number), placement coordinates around the single finder; encode + decode-with-correction.
+- The 4 micro mask predicates (ISO micro table — NOT the 8 QR masks).
+- `micro_is_function_module(mv, x, y)`: finder+separator top-left, timing full row 0 + col 0, format area.
+- Codeword placement order helper if cleanest here (2-wide zigzag, no col-6 skip, respects half codewords) — or leave to encode/decode symmetry via a shared placement iterator in core (preferred: single source of truth like `is_function_module` was).
+Tests: table invariants vs PDF values, format info roundtrip + 1–3 bitflips, mask predicate spot checks vs ISO figure, function map counts (data module count == 8*codewords - 4*half adjustments per version).
+DoD: both feature configs green, clippy clean, no_std kept.
+
+## Step 5b — qr-encode micro (after 5a)
+`encode_micro(&[u8], MicroOptions { version: Option<MicroVersion>, ec, mask: Option }) -> Result<BitMatrix>`: mode auto-select respecting per-M availability, smallest-fitting version auto-select, bit stream with M-specific indicators/counts/terminator, M1/M3 half-codeword handling, RS via core, placement via core iterator, 4-mask evaluation with the ISO micro mask-selection score (edge-count method — NOT QR N1–N4), format info placement.
+Tests: ISO Annex I micro example if present (verify in PDF; there is an M2 "01234567" example — reproduce exactly), capacity boundary per version×level, all 4 masks forced, auto-select correctness.
+DoD: both configs green, clippy, no_std.
+
+## Step 5c — qr-decode micro (after 5a)
+`decode_micro(&BitMatrix) -> Result<DecodedMicro>`: size → MicroVersion, format info read+correct → symbol number+mask, unmask, extract via core placement iterator, RS correct (M1: detection-only — verify 2 ec codewords as checksum, no correction attempt beyond?  ISO: M1 has error detection capability only — attempt correction with 2 ec cw is 1-error… follow ISO: treat as detection, reject on nonzero syndrome), parse M-specific bitstream, half-codeword handling. Mirror retry like QR path.
+Tests: fixtures from core primitives (independent of 5b), corruption, garbage.
+DoD: both configs green, clippy, no_std.
+
+## Step 5d — qr-detect micro (after 5a; decode integration after 5c lands)
+Micro detection: single finder pattern (existing finder scan already yields candidates), orientation from the two timing patterns radiating along the symbol edges adjacent to the finder, dimension from timing-run module count (11/13/15/17 snap), corner/homography from finder square + timing endpoints, sample → BitMatrix → decode_micro. Integrate into `detect`: micro candidates are finder clusters NOT consumed by any QR triple; `Detection` gains NOTHING publicly — add parallel `MicroDetection` + `detect_micro()` and a combined convenience if clean. Rotation support to ±45° like QR path where feasible; document envelope honestly.
+Tests: synthetic micro symbols (hand fixtures or via 5b as dev-dep once landed), rotation sweep, QR+micro coexisting in one image without cross-stealing finders.
+DoD: both configs green, clippy.
+
+## Step 5e — integration micro suite (after 5b–5d)
+tests-integration: micro roundtrip sweep M1–M4 × levels × content, encode→render→detect_micro→decode_micro image path, mixed image (QR + micro), fuzz extension, rotation cases.
+DoD: full workspace green.
+
+## Step 6 — CI (Arch-owned)
+GitHub Actions: test matrix (stable; macOS+ubuntu), clippy -D warnings, fmt --check, cross-target checks (thumbv7em-none-eabihf, riscv32imc-unknown-none-elf for no_std trio; wasm32-unknown-unknown all crates), both feature configs.
+
+---
+
 ## Builder Plan
 *Builder adds their plan here before building. Architect reviews and approves.*
 
@@ -84,3 +126,29 @@ qr-encode/qr-render (concurrent). qr-decode call gated behind `decode` cargo fea
 REVIEW-REQUEST-detect.md). This plan follows a direct build dispatch; proceeding without blocking.
 
 Architect approval: [x] Approved (retroactive — matches Step 2d brief; 2D template match for alignment is a sound deviation) / [ ] Redirect
+
+### Bob-M — Step 5a qr-core micro foundation (building now, per direct dispatch)
+Single new file `crates/qr-core/src/micro.rs`, gated `#[cfg(feature = "micro")]` from lib.rs; new
+`micro` feature, `default = ["micro"]`. Zero edits to existing modules — micro reuses `bch`
+(remainder helper made `pub(crate)`), `mask_bit`, `gf`, `reed_solomon`, `BitMatrix`, `EcLevel` as-is.
+
+API: `MicroVersion {M1..M4}` (size/number/from_size roundtrips), `MicroEcLevel {Detection,L,M,Q}`
+(PARALLEL type — M1's "error detection only" is not an `EcLevel`, and adding a variant to `EcLevel`
+is forbidden; converts to/from `EcLevel`), `MicroSymbolInfo` (symbol number, total/data/ec codewords,
+data bits, correction capacity r, misdecode protection p, half-codeword flag), `MicroMode`
+(+ indicator value/width, char-count width, availability per version), `micro_mask_bit`,
+`micro_format_info_encode/decode`, `MICRO_FORMAT_INFO_POSITIONS`, `micro_is_function_module`,
+and `micro_data_modules()` — an allocation-free `Iterator<Item=(u32,u32)>` that is the single source
+of truth for encode+decode placement (like `is_function_module`).
+
+Deviation flagged for Arch: brief said "allowed `EcLevel` subsets"; M1 has no EC level at all
+(ISO Table 13 symbol 0 = "Error detection only"), so a parallel `MicroEcLevel` is used instead.
+
+Verification already completed against the ISO PDF before writing code (see REVIEW-REQUEST-micro-core.md
+for clause citations): Tables 1, 2, 3, 7, 9, 10, 13, C.1, Figures 4, 11, 26, and the full Annex I.3/I.4
+M2-L worked example — Figure I.4 was rasterised at 600 dpi and decoded to a ground-truth 13x13 grid,
+which the placement iterator + mask 01 + format info reproduce with 0 mismatches on all 80 data modules.
+
+This plan follows a direct build dispatch; proceeding without blocking.
+
+Architect approval: [ ] Approved / [ ] Redirect

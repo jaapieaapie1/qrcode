@@ -5,3 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+
+[features]
+# `micro` adds the ISO/IEC 18004:2024 Micro QR (M1-M4) primitives in the `micro`
+# module: version/capacity tables, the micro format information, the four micro
+# data masks, the micro function-pattern map and the micro placement iterator.
+# On by default; opt out with `--no-default-features`. Sibling crates forward
+# this feature (`micro = ["qr-core/micro"]`) rather than pinning it off, so the
+# polarity is identical everywhere and feature unification stays additive.
+default = ["micro"]
+micro = []

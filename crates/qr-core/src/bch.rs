@@ -12,10 +12,15 @@ const FORMAT_MASK: u16 = 0x5412;
 /// + x^8 + x^5 + x^2 + 1`.
 const VERSION_GEN: u32 = 0x1F25;
 
+/// Generator polynomial for the 15-bit format info, shared with the micro QR
+/// format information (ISO Annex C.2 uses the same `(15, 5)` BCH code for both).
+#[cfg(feature = "micro")]
+pub(crate) const FORMAT_GEN_POLY: u32 = FORMAT_GEN;
+
 /// Divides `value` by `gen` (degree `gen_deg`) over GF(2), returning the
 /// `gen_deg`-bit remainder. `data_bits` is the number of information bits that
 /// sit above the remainder.
-fn bch_remainder(value: u32, generator: u32, gen_deg: u32, data_bits: u32) -> u32 {
+pub(crate) fn bch_remainder(value: u32, generator: u32, gen_deg: u32, data_bits: u32) -> u32 {
     let mut v = value;
     let mut i = data_bits;
     while i > 0 {

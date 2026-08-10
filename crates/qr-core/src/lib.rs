@@ -10,6 +10,14 @@
 //! Everything is hand-rolled with no external dependencies. `alloc` is used for
 //! the dynamically sized [`BitMatrix`] and the Reed-Solomon working buffers.
 //!
+//! # Features
+//!
+//! - `micro` (default): adds the [`micro`] module with the Micro QR (M1-M4)
+//!   primitives — version and capacity tables, format information, the four
+//!   micro data masks, the micro function-pattern map and the micro placement
+//!   iterator. These are parallel to the QR items above; nothing in the default
+//!   API changes when the feature is switched off.
+//!
 //! # Coordinates
 //!
 //! All public APIs that take coordinates use `(x, y)` = (column, row) with the
@@ -32,6 +40,9 @@ pub mod bch;
 pub mod gf;
 pub mod mask;
 pub mod reed_solomon;
+
+#[cfg(feature = "micro")]
+pub mod micro;
 
 mod bitmatrix;
 mod blocks;
