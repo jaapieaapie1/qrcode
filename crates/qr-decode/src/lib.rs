@@ -12,6 +12,13 @@
 //!
 //! All coordinates are `(x, y)` = (column, row) with the origin at the
 //! top-left, matching [`qr_core`].
+//!
+//! # Cargo features
+//!
+//! - `micro` (default): adds the [`micro`] module with [`decode_micro`] and
+//!   [`DecodedMicro`], the Micro QR (M1-M4) counterparts of [`decode`] and
+//!   [`Decoded`]. Opt out with `--no-default-features`; the full-QR path is
+//!   unaffected either way.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -25,6 +32,9 @@ mod bits;
 mod extract;
 mod segment;
 
+#[cfg(feature = "micro")]
+pub mod micro;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -32,6 +42,9 @@ use qr_core::{BitMatrix, EcLevel, Version};
 
 use extract::{extract_data, read_format_info, read_version_info};
 use segment::parse_segments;
+
+#[cfg(feature = "micro")]
+pub use micro::{DecodedMicro, decode_micro};
 
 /// The result of decoding a QR symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
