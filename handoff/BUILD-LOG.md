@@ -5,7 +5,7 @@
 
 ## Current Status
 
-**Active step:** Wave 4 — 5e under review (last step). Committed: 5a core 8fe1db5, 5c decode bcafb32, 5b encode 6d32f71, 5f r-cap 6174b10, 5d detect ba2f162. Cross-targets re-verified with micro on.
+**Active step:** none — Wave 4 COMPLETE. 5a core 8fe1db5, 5c decode bcafb32, 5b encode 6d32f71, 5f r-cap 6174b10, 5d detect ba2f162 (round-2 after BLOCKED), 5e integration 2497114, CI f13fa3a. Workspace green both configs, cross-targets green.
 **Last cleared:** Waves 1–3 complete + Step 4 detect fix (afa3d30) + CI (f13fa3a)
 **Pending deploy:** NO (local git only; no remote configured)
 
