@@ -1,8 +1,11 @@
-# Review Request — Step 5c: qr-decode micro
+# Review Request — Step 5c (qr-decode micro) + Step 5f (QR misdecode-protection cap)
 
 **Builder:** Bob-MD
 **Scope:** `crates/qr-decode/` only. No other crate touched.
 **Ready for Review: YES**
+
+Step 5f is the escalation this review surfaced (open question 3 below); Arch dispatched
+it back to me and it is addressed in the addendum at the end of this document.
 
 ---
 
@@ -181,5 +184,125 @@ module before any derived fixture is trusted.
 1. Half-codeword nibble convention vs Step 5b (decision 2 above) — needs a cross-check
    with Bob-E before Step 5e.
 2. `DecodeError` reuse vs a parallel `MicroDecodeError` (decision 1).
-3. The misdecode-protection cap now differs between the micro path (enforced) and the QR
-   path (not enforced). Arch call whether to unify.
+3. ~~The misdecode-protection cap now differs between the micro path (enforced) and the QR
+   path (not enforced).~~ **Resolved by Step 5f** — see the addendum below. The QR path now
+   enforces it too.
+
+---
+
+# Step 5f addendum — the ISO 7.5.1 cap on the full-QR path
+
+**Dispatched by Arch** off open question 3 above. Same crate, no siblings touched
+(`crates/qr-detect` deliberately untouched — a review is running on it).
+
+## The bug
+
+`extract.rs::deinterleave_and_correct` accepted whatever `rs_correct` returned, and
+`rs_correct` corrects up to the generic Reed-Solomon bound `d / 2`. For six symbols ISO
+publishes a *lower* capacity, so a version 1-L symbol with three erroneous codewords was
+being decoded and returned as a confident success where ISO requires a rejection — a
+wrong payload with no error signalled.
+
+## Clause and numbers, verified against the PDF
+
+ISO/IEC 18004:2024 §7.5.1, Formula (3): `e + 2t <= d - p`, where `e` is erasures, `t`
+errors, `d` the error correction codewords per block and `p` the misdecode protection
+codewords. The clause then states verbatim:
+
+> In Formula (3), the following values should be assigned to p:
+> — p = 3 in version 1-L and M2-L symbols,
+> — p = 2 in version 1-M, 2-L, M1, M2-M, M3-L, and M4-L symbols,
+> — p = 1 in version 1-Q, 1-H and 3-L symbols,
+> — p = 0 in all other cases.
+
+and explains the consequence:
+
+> Where p > 0, there are p (i.e. 1, 2 or 3) codewords which act as error detection
+> codewords and prevent transmission of data from symbols where the number of errors
+> exceeds the error correction capacity […] the symbol would, if there were more than four
+> errors, fail to decode.
+
+Erasures are always 0 here (a module defect surfaces as a substitution error, not an
+erasure), so the cap is `t <= (d - p) / 2`. Cross-checked against the `r` column of
+ISO Table 9 — every one of the six footnote-a QR symbols matches exactly:
+
+| Symbol | `d` (ec/block) | `p` | `(d − p) / 2` | Table 9 `r` | old bound `d / 2` | behaviour change |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1-L | 7 | 3 | 2 | 2 ✓ | 3 | **3 → 2** |
+| 1-M | 10 | 2 | 4 | 4 ✓ | 5 | **5 → 4** |
+| 1-Q | 13 | 1 | 6 | 6 ✓ | 6 | none |
+| 1-H | 17 | 1 | 8 | 8 ✓ | 8 | none |
+| 2-L | 10 | 2 | 4 | 4 ✓ | 5 | **5 → 4** |
+| 3-L | 15 | 1 | 7 | 7 ✓ | 7 | none |
+| all others | — | 0 | `d / 2` | `d / 2` | `d / 2` | none |
+
+So three symbols actually change: 1-L, 1-M and 2-L. ISO's own worked example in the same
+clause ("in a version 2-L symbol […] the error correction capacity can be seen to be four
+errors […] `0 + (2 × 4) = 10 − 2`") is the 2-L row.
+
+## Change
+
+`crates/qr-decode/src/extract.rs`:
+
+- `misdecode_protection(version, ec) -> u16` (131–153) — the six-entry `p` table, quoting
+  the clause. **Table lives in `qr-decode`, not `qr-core`**, per Arch's steer: six
+  constants consulted only by the correction step, and reopening a committed crate for
+  them buys nothing. I found no cleaner seam in core — `EcBlocks` describes *structure*
+  (how codewords split into blocks), whereas `p` is a decode-side *policy* bound, and
+  `qr-encode` has no use for it. My recommendation is to leave it here.
+- `correction_capacity(&EcBlocks, version, ec) -> usize` (155–173) — `(d − p) / 2`, with
+  the Table 9 derivation spelled out.
+- `deinterleave_and_correct` (217–231) — the accept arm is now
+  `Ok(fixed) if fixed <= capacity`; anything else is `DecodeError::BlockCorrection`.
+  Computed once per symbol, outside the block loop; the capacity is per block, which is
+  what Formula (3) specifies.
+
+Three lines of behaviour change, no signature change, no new public item.
+
+## Tests — `crates/qr-decode/tests/decode.rs`, 4 new (11 total)
+
+Versions 1-3 are single-block, so the interleaved stream *is* the RS block and corrupting
+`n` stream bytes injects exactly `n` erroneous codewords — no module-flipping guesswork.
+
+- `v1_l_rejects_the_third_error_that_reed_solomon_could_solve` — **the one Arch asked
+  for.** It first *proves the premise*: it runs `rs_correct` directly on the 3-error block
+  and asserts it returns `Ok(3)` **and** restores the original codewords bit-for-bit. So
+  the RS math demonstrably would have "corrected" it. Then `decode` on the same symbol must
+  return `BlockCorrection`, while the 2-error version still decodes with
+  `errors_corrected == 2`. Without the fix this test fails on the rejection assert.
+- `v1_m_and_v2_l_cap_correction_below_the_reed_solomon_bound` — the other two symbols that
+  change, same premise-then-rejection structure (`r = 4`, RS bound 5).
+- `unaffected_symbols_keep_the_full_reed_solomon_bound` — 1-Q, 1-H, 2-M, 3-L, 3-M all still
+  correct a full `d / 2`. Covers both "p = 0" and "p > 0 but rounds to the same capacity".
+- `multiblock_v5_q_correction_is_unchanged` — v5-Q, `p = 0`, 4 blocks, 9 errors per block
+  (the full bound) still corrected. This is the structure the integration corruption tests
+  exercise.
+
+All 7 pre-existing decode tests pass unchanged.
+
+## DoD
+
+| Gate | Result |
+| --- | --- |
+| `cargo test -p qr-decode` | 11 + 28 pass |
+| `cargo test -p qr-decode --no-default-features` | 11 pass |
+| `cargo test -p tests-integration` | 54 pass, unchanged |
+| `cargo check --workspace` | green |
+| `cargo clippy -p qr-decode --all-targets -- -D warnings` | clean, both feature configs |
+| `cargo fmt --check -p qr-decode` | clean |
+| `thumbv7em-none-eabihf` / `riscv32imc-unknown-none-elf` | green, both feature configs |
+
+**Integration impact verified, as Arch asked.** The corruption/noise tests in
+`tests-integration/tests/warped.rs` encode a 42-byte payload, which auto-selects well above
+version 3 at every level (`noisy_render` uses M, `heavy_noise_with_rs_recovery` uses H), and
+`decodes_multiblock_byte_symbol` is v5-Q — all `p = 0`, all untouched. The lowest explicit
+version anywhere in the integration suite is v7. Nothing in it sits in the 1-L / 1-M / 2-L
+window, and the whole suite is green.
+
+## Note for Arch
+
+The new cap makes low-version symbols marginally *less* tolerant of damage — that is the
+point, and it is what ISO mandates, but it is a real behaviour change for any caller
+scanning v1/v2 symbols in poor conditions. It trades a small amount of recovery for the
+elimination of a class of silent wrong-payload returns. Worth a line in the release notes
+when this crate ships.

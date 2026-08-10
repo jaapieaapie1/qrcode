@@ -11,7 +11,7 @@
 //! irrelevant to these tests.
 
 use qr_core::bch::{format_info_encode, version_info_encode};
-use qr_core::reed_solomon::rs_encode;
+use qr_core::reed_solomon::{rs_correct, rs_encode};
 use qr_core::{BitMatrix, EcLevel, Mode, Version, ec_blocks, is_function_module, mask_bit};
 
 use qr_decode::{DecodeError, decode};
@@ -324,4 +324,142 @@ fn decodes_version_info_symbol() {
     let d = decode(&m).expect("decode v7-M");
     assert_eq!(d.bytes, payload);
     assert_eq!(d.version, v);
+}
+
+// ----- ISO 7.5.1 misdecode protection --------------------------------------
+//
+// ISO/IEC 18004:2024 §7.5.1 Formula (3) is `e + 2t <= d - p`. For the six
+// symbols with `p > 0` — 1-L (p=3), 1-M and 2-L (p=2), 1-Q, 1-H and 3-L (p=1) —
+// the published correction capacity `r` in Table 9 is strictly below the `d / 2`
+// that Reed-Solomon alone can solve, and Table 9 marks each of them with
+// footnote a: "the error correction capacity is less than half the number of
+// error correction codewords to reduce the probability of misdecodes".
+//
+// Versions 1..=3 are all single-block, so the interleaved codeword stream *is*
+// the Reed-Solomon block and corrupting `n` stream bytes puts exactly `n`
+// erroneous codewords into that block.
+
+/// Corrupts the first `n` codewords of a single-block symbol's stream.
+fn corrupt_codewords(stream: &[u8], n: usize) -> Vec<u8> {
+    let mut out = stream.to_vec();
+    for byte in out.iter_mut().take(n) {
+        *byte ^= 0xFF;
+    }
+    out
+}
+
+/// The heart of the fix: a version 1-L symbol carrying three erroneous
+/// codewords is solvable by the Reed-Solomon math (`d / 2 = 7 / 2 = 3`) but ISO
+/// caps 1-L at `r = (7 - 3) / 2 = 2`. Accepting the third error would hand back
+/// a confidently wrong payload.
+#[test]
+fn v1_l_rejects_the_third_error_that_reed_solomon_could_solve() {
+    let v = Version::new(1).unwrap();
+    let stream = encode_byte(v, EcLevel::L, b"CAP");
+    assert_eq!(ec_blocks(v, EcLevel::L).ec_per_block, 7);
+    assert_eq!(ec_blocks(v, EcLevel::L).total_blocks(), 1);
+
+    // The premise: raw Reed-Solomon really does recover three errors here, so
+    // the rejection below comes from the ISO cap and nothing else.
+    let mut block = corrupt_codewords(&stream, 3);
+    assert_eq!(
+        rs_correct(&mut block, 7).expect("RS solves 3 of 7"),
+        3,
+        "test premise: the RS math corrects three errors in a 1-L block"
+    );
+    assert_eq!(block, stream, "RS restored the original codewords");
+
+    // r = 2 errors: still corrected.
+    let m = build_matrix(v, EcLevel::L, 0, &corrupt_codewords(&stream, 2));
+    let d = decode(&m).expect("two errors are within v1-L capacity");
+    assert_eq!(d.bytes, b"CAP");
+    assert_eq!(d.errors_corrected, 2);
+
+    // r + 1 = 3 errors: rejected, per ISO Formula (3).
+    let m = build_matrix(v, EcLevel::L, 0, &corrupt_codewords(&stream, 3));
+    assert_eq!(decode(&m), Err(DecodeError::BlockCorrection));
+}
+
+/// The same cap on the other two symbols where it bites: 1-M (`r = 4`,
+/// `d / 2 = 5`) and 2-L (`r = 4`, `d / 2 = 5`).
+#[test]
+fn v1_m_and_v2_l_cap_correction_below_the_reed_solomon_bound() {
+    for (number, ec, r) in [(1u8, EcLevel::M, 4usize), (2, EcLevel::L, 4)] {
+        let v = Version::new(number).unwrap();
+        let bl = ec_blocks(v, ec);
+        assert_eq!(bl.total_blocks(), 1);
+        assert_eq!(r + 1, bl.ec_per_block as usize / 2, "v{number} {ec:?}");
+
+        let stream = encode_byte(v, ec, b"cap");
+
+        let m = build_matrix(v, ec, 1, &corrupt_codewords(&stream, r));
+        let d = decode(&m).unwrap_or_else(|e| panic!("v{number} {ec:?} at r = {r}: {e}"));
+        assert_eq!(d.bytes, b"cap");
+        assert_eq!(d.errors_corrected, r);
+
+        let mut block = corrupt_codewords(&stream, r + 1);
+        assert_eq!(
+            rs_correct(&mut block, bl.ec_per_block as usize).expect("RS solves d/2"),
+            r + 1,
+            "test premise: v{number} {ec:?} RS corrects {} errors",
+            r + 1
+        );
+
+        let m = build_matrix(v, ec, 1, &corrupt_codewords(&stream, r + 1));
+        assert_eq!(
+            decode(&m),
+            Err(DecodeError::BlockCorrection),
+            "v{number} {ec:?} accepted {} errors past r = {r}",
+            r + 1
+        );
+    }
+}
+
+/// Symbols with `p = 0` keep the full `d / 2` capacity, and so do the three
+/// symbols where `p` is small enough that `(d - p) / 2` still equals `d / 2`
+/// (1-Q, 1-H, 3-L). Nothing outside the six footnote-a symbols changes.
+#[test]
+fn unaffected_symbols_keep_the_full_reed_solomon_bound() {
+    // 2-M and 3-M have p = 0; 1-Q, 1-H and 3-L have p > 0 but round to the
+    // same capacity, so none of these five may change.
+    for (number, ec) in [
+        (1u8, EcLevel::Q),
+        (1, EcLevel::H),
+        (2, EcLevel::M),
+        (3, EcLevel::L),
+        (3, EcLevel::M),
+    ] {
+        let v = Version::new(number).unwrap();
+        let bl = ec_blocks(v, ec);
+        assert_eq!(bl.total_blocks(), 1, "v{number} {ec:?} is single-block");
+        let bound = bl.ec_per_block as usize / 2;
+
+        let stream = encode_byte(v, ec, b"ok");
+        let m = build_matrix(v, ec, 4, &corrupt_codewords(&stream, bound));
+        let d = decode(&m)
+            .unwrap_or_else(|e| panic!("v{number} {ec:?} lost its full bound of {bound}: {e}"));
+        assert_eq!(d.bytes, b"ok");
+        assert_eq!(d.errors_corrected, bound);
+    }
+}
+
+/// The multi-block path is untouched: v5-Q has `p = 0`, four blocks and
+/// `d / 2 = 9` per block. This is the structure the integration corruption
+/// tests use.
+#[test]
+fn multiblock_v5_q_correction_is_unchanged() {
+    let v = Version::new(5).unwrap();
+    let bl = ec_blocks(v, EcLevel::Q);
+    assert_eq!(bl.total_blocks(), 4);
+    assert_eq!(bl.ec_per_block, 18);
+
+    let payload: Vec<u8> = (0..40u8).map(|i| b'A' + (i % 26)).collect();
+    let stream = encode_byte(v, EcLevel::Q, &payload);
+
+    // Interleaving spreads consecutive stream bytes across the four blocks, so
+    // corrupting the first 36 bytes puts 9 errors — the full bound — in each.
+    let m = build_matrix(v, EcLevel::Q, 5, &corrupt_codewords(&stream, 36));
+    let d = decode(&m).expect("v5-Q corrects 9 errors per block");
+    assert_eq!(d.bytes, payload);
+    assert_eq!(d.errors_corrected, 36);
 }

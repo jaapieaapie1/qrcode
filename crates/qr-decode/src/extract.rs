@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use qr_core::bch::{format_info_decode, version_info_decode};
 use qr_core::reed_solomon::rs_correct;
-use qr_core::{BitMatrix, EcLevel, Version, ec_blocks, is_function_module, mask_bit};
+use qr_core::{BitMatrix, EcBlocks, EcLevel, Version, ec_blocks, is_function_module, mask_bit};
 
 use crate::DecodeError;
 
@@ -128,6 +128,50 @@ fn read_codeword_stream(m: &BitMatrix, version: Version, mask: u8) -> Vec<u8> {
     stream
 }
 
+/// Misdecode protection codewords `p` for a symbol (ISO/IEC 18004:2024 §7.5.1).
+///
+/// The clause reads: *"In Formula (3), the following values should be assigned
+/// to p: p = 3 in version 1-L and M2-L symbols, p = 2 in version 1-M, 2-L, M1,
+/// M2-M, M3-L, and M4-L symbols, p = 1 in version 1-Q, 1-H and 3-L symbols,
+/// p = 0 in all other cases."* Only the QR entries appear here; the micro
+/// entries live with the micro decoder.
+///
+/// `p` is the count of error correction codewords that are reserved to *detect*
+/// rather than correct, which is why ISO Table 9 marks these six symbols with
+/// footnote a — "the error correction capacity is less than half the number of
+/// error correction codewords to reduce the probability of misdecodes".
+///
+/// The table is kept local to the decoder: it is six constants that only the
+/// correction step consults, and `qr-core` is already committed.
+fn misdecode_protection(version: Version, ec: EcLevel) -> u16 {
+    match (version.number(), ec) {
+        (1, EcLevel::L) => 3,
+        (1, EcLevel::M) | (2, EcLevel::L) => 2,
+        (1, EcLevel::Q) | (1, EcLevel::H) | (3, EcLevel::L) => 1,
+        _ => 0,
+    }
+}
+
+/// Error correction capacity `r` of one block: the maximum number of erroneous
+/// codewords ISO permits correcting.
+///
+/// ISO §7.5.1 Formula (3) is `e + 2t <= d - p`, where `e` is erasures (always 0
+/// here — module-level defects surface as substitution errors, not erasures),
+/// `t` is errors, `d` is the error correction codewords per block and `p` the
+/// misdecode protection. With `e = 0` that is `t <= (d - p) / 2`.
+///
+/// This reproduces the `r` column of ISO Table 9 exactly: 1-L `(7-3)/2 = 2`,
+/// 1-M `(10-2)/2 = 4`, 1-Q `(13-1)/2 = 6`, 1-H `(17-1)/2 = 8`, 2-L
+/// `(10-2)/2 = 4`, 3-L `(15-1)/2 = 7`, and `d / 2` everywhere else.
+///
+/// Reed-Solomon itself would happily solve `d / 2` errors, so without this cap a
+/// version 1-L symbol carrying three errors decodes to a confidently wrong
+/// payload where ISO requires a rejection.
+fn correction_capacity(bl: &EcBlocks, version: Version, ec: EcLevel) -> usize {
+    let p = misdecode_protection(version, ec);
+    (bl.ec_per_block.saturating_sub(p) / 2) as usize
+}
+
 /// Splits the interleaved `stream` back into Reed-Solomon blocks, corrects each
 /// and concatenates the recovered data codewords in block order.
 fn deinterleave_and_correct(
@@ -170,15 +214,19 @@ fn deinterleave_and_correct(
         }
     }
 
+    // Per-block correction capacity from ISO Formula (3), which is at or below
+    // the `ecc / 2` bound Reed-Solomon alone would allow.
+    let capacity = correction_capacity(&bl, version, ec);
+
     let mut data = Vec::with_capacity(bl.total_data_codewords() as usize);
     let mut errors_corrected = 0usize;
     for (b, block) in blocks.iter_mut().enumerate() {
         match rs_correct(block, ecc) {
-            Ok(fixed) => {
+            Ok(fixed) if fixed <= capacity => {
                 errors_corrected += fixed;
                 data.extend_from_slice(&block[..data_len(b)]);
             }
-            Err(_) => return Err(DecodeError::BlockCorrection),
+            _ => return Err(DecodeError::BlockCorrection),
         }
     }
 
