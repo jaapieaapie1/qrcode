@@ -202,11 +202,18 @@ fn is_nested_in(cand: &QrCandidate, triple: &QrCandidate) -> bool {
     })
 }
 
-/// Groups finders into QR candidates (best, non-overlapping first).
-pub fn group(finders: &[Finder]) -> Vec<QrCandidate> {
+/// Groups finders into QR candidates (best, non-overlapping first), and reports
+/// which finders an accepted triple consumed.
+///
+/// The returned flag vector is parallel to `finders`. A finder left unconsumed
+/// is a candidate anchor for a single-finder symbology (see `crate::micro`);
+/// one consumed by a QR triple must never be, or every QR symbol would sprout
+/// three phantom micro symbols.
+pub fn group(finders: &[Finder]) -> (Vec<QrCandidate>, Vec<bool>) {
     let n = finders.len();
+    let mut used = vec![false; n];
     if n < 3 {
-        return Vec::new();
+        return (Vec::new(), used);
     }
 
     let mut scored: Vec<Scored> = Vec::new();
@@ -225,7 +232,6 @@ pub fn group(finders: &[Finder]) -> Vec<QrCandidate> {
             .unwrap_or(core::cmp::Ordering::Equal)
     });
 
-    let mut used = vec![false; n];
     let mut out = Vec::new();
     for s in scored {
         if s.idx.iter().any(|&i| used[i]) {
@@ -239,7 +245,7 @@ pub fn group(finders: &[Finder]) -> Vec<QrCandidate> {
         }
         out.push(s.cand);
     }
-    out
+    (out, used)
 }
 
 #[cfg(test)]
@@ -279,7 +285,7 @@ mod tests {
             f(base + sep, base, m),
             f(base, base + sep, m),
         ];
-        let groups = group(&finders);
+        let (groups, _) = group(&finders);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].dimension, 21);
     }
@@ -294,7 +300,7 @@ mod tests {
             finders.push(f(ox + 14.0 + sep, 14.0, m));
             finders.push(f(ox + 14.0, 14.0 + sep, m));
         }
-        let groups = group(&finders);
+        let (groups, _) = group(&finders);
         assert_eq!(groups.len(), 2);
     }
 
@@ -340,7 +346,7 @@ mod tests {
             f(tl.0 + sep * c, tl.1 + sep * s, stretched),
             f(tl.0 - sep * s, tl.1 + sep * c, stretched),
         ];
-        let groups = group(&finders);
+        let (groups, _) = group(&finders);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].dimension, 57);
     }
@@ -367,13 +373,13 @@ mod tests {
 
         let mut all = real.to_vec();
         all.extend_from_slice(&phantom);
-        let groups = group(&all);
+        let (groups, _) = group(&all);
         assert_eq!(groups.len(), 1, "the nested triple must not be accepted");
         assert_eq!(groups[0].dimension, 45);
 
         // Without the real symbol around it the same triple is a valid candidate,
         // so the rejection is the nesting rule and not the geometry.
-        assert_eq!(group(&phantom).len(), 1);
+        assert_eq!(group(&phantom).0.len(), 1);
     }
 
     #[test]

@@ -14,5 +14,18 @@ qr-decode = { workspace = true, optional = true }
 # (`qr_decode::decode(&BitMatrix) -> Result<Decoded, _>`). On by default now
 # that qr-decode exports that API; disable with `--no-default-features` to build
 # detection standalone.
-default = ["decode"]
+#
+# `micro` adds single-finder Micro QR detection (M1-M4) through the parallel
+# `MicroDetection` / `detect_micro` / `detect_all` API. It forwards qr-core's
+# feature of the same name, so the polarity is identical across the workspace.
+#
+# There is deliberately no separate "micro-decode" feature: a detected micro
+# symbol is run through `qr_decode::micro::decode_micro` exactly when `micro`
+# and `decode` are both on, which is the same rule the QR path already follows.
+# The weak `qr-decode?/micro` is what makes that safe — it turns qr-decode's own
+# micro module on if and only if `decode` has pulled qr-decode in, so `micro`
+# alone never drags in the optional dependency, and `micro` + `decode` can never
+# reach for a `qr_decode::micro` that was compiled out.
+default = ["decode", "micro"]
 decode = ["dep:qr-decode"]
+micro = ["qr-core/micro", "qr-decode?/micro"]

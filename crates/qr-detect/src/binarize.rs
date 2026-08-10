@@ -80,8 +80,8 @@ fn adaptive(luma: &[u8], width: u32, height: u32) -> Binary {
         }
     }
 
-    // Window radius ~ 1/16 of the smaller side, at least 4 px.
-    let radius = (w.min(h) / 16).max(4) as i64;
+    // Window radius ~ 1/8 of the smaller side, at least 4 px.
+    let radius = (w.min(h) / 8).max(4) as i64;
     // Bradley "t" parameter: a pixel is dark when it is >= 12% below the local
     // mean.
     let t_num: u64 = 88; // (100 - 12)
@@ -200,5 +200,123 @@ mod tests {
         let b = binarize(&luma, w, h).unwrap();
         assert!(b.get(24, 30), "dark line should be dark"); // 24 % 6 == 0
         assert!(!b.get(27, 30), "gap should be light"); // 27 % 6 == 3
+    }
+
+    #[test]
+    fn a_solid_block_does_not_hollow_out() {
+        // The 3x3 core of a finder pattern is the largest solid feature in any
+        // symbol, and in a tightly framed shot it covers a good fraction of the
+        // image: an 11-module micro symbol with its quiet zone is 15 modules
+        // across, so the core is a fifth of the frame.
+        //
+        // Where the adaptive window fits *inside* such a block the local mean is
+        // the block's own colour, the pixel is not below it, and the centre of
+        // the block flips to light. The finder scan's vertical cross-check walks
+        // the contiguous dark band through the centre, so a hole there costs the
+        // whole symbol. The window must stay wider than the block.
+        let side = 168u32; // 21 modules of 8 px, as a micro symbol renders
+        let block = 24u32; // three modules
+        let mut luma = vec![255u8; (side * side) as usize];
+        let lo = (side - block) / 2;
+        for y in lo..lo + block {
+            for x in lo..lo + block {
+                luma[(y * side + x) as usize] = 0;
+            }
+        }
+        let b = binarize(&luma, side, side).unwrap();
+        for y in lo..lo + block {
+            for x in lo..lo + block {
+                assert!(b.get(x as i64, y as i64), "({x}, {y}) hollowed out");
+            }
+        }
+    }
+
+    /// Renders a worn-print symbol in the corner of a camera frame under a
+    /// radial vignette, and returns how many of its module centres binarize
+    /// wrongly.
+    ///
+    /// `depth` is the vignette depth: illumination falls as
+    /// `1 - depth * (r / r_max)^2` from the frame centre. Print contrast is 45%
+    /// (dark modules reflect 0.55 of the light ones), which is worn thermal
+    /// print rather than fresh laser.
+    fn vignetted_module_errors(depth: f64) -> u32 {
+        let (w, h) = (1280u32, 720u32);
+        let (modules, scale) = (25u32, 3u32);
+        let (ox, oy) = (40u32, 40u32); // near the frame corner, where it hurts
+        let cx = (w - 1) as f64 / 2.0;
+        let cy = (h - 1) as f64 / 2.0;
+        let r_max = (cx * cx + cy * cy).sqrt();
+
+        // Deterministic module pattern, as dense as real data.
+        let dark_module = |mx: u32, my: u32| {
+            let mut v = (mx.wrapping_mul(73_856_093) ^ my.wrapping_mul(19_349_663)).wrapping_add(1);
+            v ^= v >> 13;
+            v = v.wrapping_mul(0x5bd1_e995);
+            v ^= v >> 15;
+            v & 1 == 0
+        };
+
+        let mut luma = vec![0u8; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x as f64 - cx, y as f64 - cy);
+                let r = (dx * dx + dy * dy).sqrt() / r_max;
+                let illumination = 1.0 - depth * r * r;
+                let mut reflectance = 1.0f64;
+                if x >= ox
+                    && y >= oy
+                    && x < ox + modules * scale
+                    && y < oy + modules * scale
+                    && dark_module((x - ox) / scale, (y - oy) / scale)
+                {
+                    reflectance = 0.55;
+                }
+                luma[(y * w + x) as usize] = (255.0 * illumination * reflectance)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        let b = binarize(&luma, w, h).unwrap();
+        let mut bad = 0;
+        for my in 0..modules {
+            for mx in 0..modules {
+                let px = (ox + mx * scale + scale / 2) as i64;
+                let py = (oy + my * scale + scale / 2) as i64;
+                if b.get(px, py) != dark_module(mx, my) {
+                    bad += 1;
+                }
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn adaptive_survives_a_vignette_to_the_documented_depth() {
+        // The other side of the window-radius trade-off, and the direction it
+        // costs. A wider window tracks illumination less closely, so a small
+        // low-contrast symbol in the corner of a large frame — where the window
+        // is clamped against the border and the vignette curves inside it — is
+        // where the current `/8` radius runs out first.
+        //
+        // Measured on this exact fixture, module errors out of 625:
+        //
+        //   depth  0.50  0.70  0.85  0.90  0.95
+        //   /8        0     0     0    13    32
+        //   /16       0     0     0     0     0
+        //
+        // So the envelope pinned here is a vignette depth of 0.85: the corner of
+        // the frame at 15% of the centre's illumination, with 45% print
+        // contrast. Past that the narrower window would still have held, and we
+        // no longer do. `/8` is not negotiable — a micro symbol's 3-module
+        // finder core hollows out beneath it (see the test above) — so this is a
+        // real cost, accepted deliberately. The fix that keeps both envelopes is
+        // two candidate binarizations driven through the finder scan, which is
+        // its own step, not a threshold tweak.
+        assert_eq!(
+            vignetted_module_errors(0.85),
+            0,
+            "a 0.85-depth vignette must still binarize cleanly"
+        );
     }
 }
