@@ -1,0 +1,26 @@
+[package]
+name = "esp-selftest"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Deliberately outside the workspace (see the root `exclude`): this crate only
+# ever builds for `riscv32imc-unknown-none-elf` and links against a linker
+# script, so it must not be swept up by `cargo test --workspace` or by the
+# host-target lint jobs.
+
+[dependencies]
+# Default features on, so `micro` is exercised exactly as an ESP32-C3 firmware
+# would get it from crates.io.
+qr-core = { path = "../crates/qr-core" }
+qr-encode = { path = "../crates/qr-encode" }
+qr-decode = { path = "../crates/qr-decode" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true

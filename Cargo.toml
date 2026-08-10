@@ -9,6 +9,9 @@ members = [
     "crates/qr-render",
     "tests-integration",
 ]
+# Bare-metal QEMU self-test: builds only for riscv32imc-unknown-none-elf and
+# links a linker script, so it must not join the host-target workspace builds.
+exclude = ["esp-selftest"]
 
 [workspace.package]
 version = "0.1.0"

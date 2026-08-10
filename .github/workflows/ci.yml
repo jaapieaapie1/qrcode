@@ -59,3 +59,44 @@ jobs:
         run: cargo check -p qr-core -p qr-encode -p qr-decode --no-default-features --target thumbv7em-none-eabihf
       - name: All crates on wasm32
         run: cargo check -p qr-core -p qr-encode -p qr-decode -p qr-detect -p qr-render -p qr-video --target wasm32-unknown-unknown
+
+  esp32-emulation:
+    name: ESP32-class execution (QEMU riscv32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imc-unknown-none-elf
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp-selftest
+      - name: Install qemu-system-riscv32
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-misc
+          qemu-system-riscv32 --version
+      # esp-selftest is excluded from the workspace, so neither the `lint` job's
+      # `cargo fmt --all` nor its `cargo clippy --workspace` can see it.
+      - name: fmt
+        working-directory: esp-selftest
+        run: cargo fmt --check
+      - name: Clippy
+        working-directory: esp-selftest
+        run: cargo clippy --release -- -D warnings
+      - name: Build bare-metal self-test
+        working-directory: esp-selftest
+        run: cargo build --release
+      - name: Run self-test on emulated riscv32
+        working-directory: esp-selftest
+        run: |
+          set -o pipefail
+          timeout 120 qemu-system-riscv32 \
+            -machine virt -nographic -bios none \
+            -kernel target/riscv32imc-unknown-none-elf/release/esp-selftest \
+            | tee run.log
+          # The SiFive test finisher gives QEMU its exit status, which the
+          # pipefail above propagates. Insist on the banner too, so a QEMU that
+          # ignored the finisher or a run killed by `timeout` cannot pass.
+          grep -q '^ALL PASS' run.log

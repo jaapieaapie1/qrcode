@@ -1,0 +1,9 @@
+# Target selection only. The linker script and `--nmagic` are emitted by
+# `build.rs` as `cargo::rustc-link-arg-bins`, which is additive and cannot be
+# clobbered by a `RUSTFLAGS` environment variable the way a `rustflags` table
+# here can be.
+#
+# Cargo discovers this file from the *working directory*, not from the manifest,
+# so build from inside `esp-selftest/`.
+[build]
+target = "riscv32imc-unknown-none-elf"

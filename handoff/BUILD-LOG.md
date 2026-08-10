@@ -5,7 +5,7 @@
 
 ## Current Status
 
-**Active step:** none — Wave 4 COMPLETE. 5a core 8fe1db5, 5c decode bcafb32, 5b encode 6d32f71, 5f r-cap 6174b10, 5d detect ba2f162 (round-2 after BLOCKED), 5e integration 2497114, CI f13fa3a. Workspace green both configs, cross-targets green.
+**Active step:** Step 7 (esp-selftest, QEMU riscv32 execution in CI) — CLEAR, round-2 fixes applied, ready for Arch to push. Wave 4 COMPLETE. 5a core 8fe1db5, 5c decode bcafb32, 5b encode 6d32f71, 5f r-cap 6174b10, 5d detect ba2f162 (round-2 after BLOCKED), 5e integration 2497114, CI f13fa3a. Workspace green both configs, cross-targets green.
 **Last cleared:** Waves 1–3 complete + Step 4 detect fix (afa3d30) + CI (f13fa3a)
 **Pending deploy:** NO (local git only; no remote configured)
 
@@ -87,6 +87,63 @@ Key decisions:
   remainder tables for all 40 versions (independent verification).
 
 See handoff/REVIEW-REQUEST.md for full detail. Ready for Richard.
+
+### Step 7 — ESP32-class execution test in CI — REVIEWED CLEAR, ROUND-2 FIXES APPLIED
+*Date: 2026-08-11 — Bob-E32 (Richard-E32: CLEAR, 0 BLOCKER / 1 MAJOR / 8 MINOR — all addressed)*
+
+Files changed:
+- `Cargo.toml` — `exclude = ["esp-selftest"]` only; no other root edit
+- `esp-selftest/` — NEW, outside the workspace: bare-metal `no_std`/`no_main`
+  firmware for QEMU `virt` riscv32imc. Hand-rolled `_start` (global_asm), linker
+  script (RAM 0x8000_0000), 192 KiB bump allocator, NS16550A UART0 driver at
+  0x1000_0000, panic handler, SiFive test finisher exit at 0x0010_0000. Zero
+  dependencies outside qr-core/qr-encode/qr-decode (default features, micro on).
+- `.github/workflows/ci.yml` — new `esp32-emulation` job: apt qemu-system-misc,
+  riscv32imc target, own `cargo fmt --check`, build, run under `timeout 120`
+
+What it executes on the emulated core: QR roundtrip v1/2/3/5/7/8/10 × L/M/Q/H
+plus an auto-version symbol (29); all 8 Micro QR symbols with numeric capacity
+probed not tabulated (8); RS recovery incl. 5-Q four-block at full capacity (3);
+ISO 7.5.1 r-cap rejection incl. the headline 1-L-with-3-errors case (7).
+Local result: `ALL PASS`, QEMU exit 0, heap peak 75 348 / 196 608 bytes.
+
+Key decisions:
+- Corruption is injected at exact codeword granularity by replaying the ISO
+  7.7.3 zigzag (`codeword_modules`), so the capacity-boundary cases are exact
+  rather than bounded-from-above.
+- Arena reset between suites: a bump allocator cannot reclaim non-LIFO frees, so
+  the raw peak measured fragmentation (122 KB, climbing per suite) rather than
+  working set. Reset makes the footprint bounded by the worst single suite.
+- CI job restates RUSTFLAGS at job level: a `RUSTFLAGS` env var overrides
+  `[target.*] rustflags` wholesale, so the workflow-level `-D warnings` would
+  drop the linker script (verified: `undefined symbol: __ebss`).
+- Negative controls run and reverted: forced assertion failure → exit 1 with
+  detail; 2 KiB heap → panic handler prints OOM → exit 1.
+
+Round-2 fixes (Richard-E32 review, all 9 findings):
+- MAJOR: trap vector installed. `_start` sets `mtvec`; `_trap` re-points `sp` at
+  the stack top and `rust_trap` prints the named cause + mcause/mepc/mtval, then
+  exits fail, with a re-entry guard. Verified by injecting an unmapped load:
+  `TRAP: load access fault  mcause 0x5 mepc 0x80002858 mtval 0x0`, exit 1 —
+  previously a 120 s silent `timeout`.
+- Link args moved from `.cargo/config.toml` rustflags to `build.rs`
+  (`cargo::rustc-link-arg-bins`, absolute `-T` path, `rerun-if-changed`), which
+  RUSTFLAGS cannot clobber. `ci.yml` job `env:` block deleted; plain workflow
+  `-D warnings` now verified to link and run green.
+- `_start` clears `mstatus.MIE` + `mie` so the allocator's `unsafe impl Sync`
+  rests on enforced state, not on reset defaults.
+- Linker `ASSERT(__ebss + 0x10000 < _stack_start)` — verified it fires.
+- Local `misdecode_protection`/`correction_capacity` (ISO Formula 3); suite 4 is
+  now a `(version, level, published r)` table cross-checked against the formula,
+  8 cases; suite 3's 5-Q asserts 4 blocks of capacity 9.
+- `checked_next_multiple_of` in the allocator; micro probe asserts it found a
+  boundary rather than hitting its ceiling; CI gained a clippy step for the
+  excluded crate; doc comments corrected on `codeword_modules` (independent
+  hand-maintained duplicate) and on building from inside the crate directory.
+
+`cargo test --workspace` green (exit 0), root `cargo fmt --all --check` clean,
+esp-selftest fmt + clippy clean, QEMU `ALL PASS` exit 0.
+See handoff/REVIEW-REQUEST-esp-selftest.md.
 
 ---
 
