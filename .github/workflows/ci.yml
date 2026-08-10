@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test workspace (default features)
+        run: cargo test --workspace
+      - name: Test workspace (no default features)
+        run: cargo test --workspace --no-default-features
+
+  lint:
+    name: Clippy + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: Clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (no default features)
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+  cross-targets:
+    name: Cross-target checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf, riscv32imc-unknown-none-elf, wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: no_std crates on bare-metal ARM (Cortex-M)
+        run: cargo check -p qr-core -p qr-encode -p qr-decode --target thumbv7em-none-eabihf
+      - name: no_std crates on bare-metal RISC-V (ESP32-C3 class)
+        run: cargo check -p qr-core -p qr-encode -p qr-decode --target riscv32imc-unknown-none-elf
+      - name: no_std crates without default features (bare-metal ARM)
+        run: cargo check -p qr-core -p qr-encode -p qr-decode --no-default-features --target thumbv7em-none-eabihf
+      - name: All crates on wasm32
+        run: cargo check -p qr-core -p qr-encode -p qr-decode -p qr-detect -p qr-render -p qr-video --target wasm32-unknown-unknown
