@@ -7,6 +7,7 @@ members = [
     "crates/qr-detect",
     "crates/qr-video",
     "crates/qr-render",
+    "tests-integration",
 ]
 
 [workspace.package]
@@ -20,4 +21,6 @@ qr-core = { path = "crates/qr-core" }
 qr-encode = { path = "crates/qr-encode" }
 qr-decode = { path = "crates/qr-decode" }
 qr-detect = { path = "crates/qr-detect" }
+qr-render = { path = "crates/qr-render" }
+qr-video = { path = "crates/qr-video" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

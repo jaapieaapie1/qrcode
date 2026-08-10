@@ -1,0 +1,17 @@
+[package]
+name = "tests-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+qr-core = { workspace = true }
+qr-encode = { workspace = true }
+qr-decode = { workspace = true }
+qr-detect = { workspace = true }
+qr-render = { workspace = true }
+qr-video = { workspace = true }
+image = { workspace = true }
