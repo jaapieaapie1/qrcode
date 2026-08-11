@@ -40,16 +40,20 @@ fn extract_bits(matrix: &BitMatrix, version: MicroVersion, mask: u8) -> Vec<bool
 }
 
 /// Splits an unmasked module bit stream back into codewords, honouring the 4-bit
-/// final data codeword of M1 and M3. That codeword is returned as a value in
-/// `0..=15` — zero-prefixed, not zero-suffixed — which is the workspace-wide
-/// convention for feeding it to Reed-Solomon (ISO 7.4.11, Annex N.1 precedent),
-/// agreed with the qr-decode side.
+/// final data codeword of M1 and M3. That codeword is returned **left-justified**
+/// (`nibble << 4`, low nibble clear), which is the workspace-wide convention for
+/// feeding it to Reed-Solomon (ISO 7.4.11 defines the 4-bit width, 7.5.2 the
+/// byte-wise arithmetic, and the standard settles nothing in between; the
+/// left-justified reading is what zxing-cpp and segno both emit — see
+/// `handoff/REVIEW-REQUEST-interop.md`). Agreed with the qr-decode side.
 fn to_codewords(bits: &[bool], info: &MicroSymbolInfo) -> (Vec<u8>, Vec<u8>) {
     let mut cursor = 0usize;
     let mut take = |count: usize| -> u8 {
         let mut value = 0u8;
-        for _ in 0..count {
-            value = (value << 1) | u8::from(bits[cursor]);
+        for i in 0..count {
+            if bits[cursor] {
+                value |= 1 << (7 - i);
+            }
             cursor += 1;
         }
         value
@@ -191,8 +195,10 @@ fn m1_bit_stream_and_half_codeword() {
     //   bits and no pad codewords are needed.
     //   100 0001111011 0100 000 -> 10000011 11011010 0000
     // The final codeword is the 4-bit half codeword; it enters the
-    // Reed-Solomon step zero-prefixed (value 0..=15, ISO Annex N.1 precedent)
-    // and only those 4 bits are written into the symbol.
+    // Reed-Solomon step left-justified (`nibble << 4`) and only those 4 bits are
+    // written into the symbol. Here the nibble is 0000, so this payload cannot
+    // tell the two widening conventions apart — see
+    // `half_codeword_enters_reed_solomon_left_justified` for one that can.
     let symbol = encode_micro(b"1234", options(MicroEcLevel::Detection, None, None)).unwrap();
     assert_eq!(symbol.size(), 11, "M1 is 11 modules across");
 
@@ -215,14 +221,19 @@ fn m1_bit_stream_and_half_codeword() {
 }
 
 #[test]
-fn half_codeword_enters_reed_solomon_zero_prefixed() {
-    // The convention for the 4-bit final data codeword of M1 and M3: it is a
-    // value in 0..=15, zero-PREFIXED for the Reed-Solomon step, following the
-    // ISO Annex N.1 precedent for the other 4-bit codeword the standard defines
-    // ("The first 4-bit data codeword is prefixed with 0000 to make its length 8
-    // bits for generating the error correction codewords"). Agreed workspace
-    // wide with the qr-decode side; ISO prints no worked M1/M3 example, so this
-    // test is the contract.
+fn half_codeword_enters_reed_solomon_left_justified() {
+    // The convention for the 4-bit final data codeword of M1 and M3: it is
+    // widened to a byte LEFT-JUSTIFIED (`nibble << 4`) for the Reed-Solomon step.
+    // ISO 7.4.11 gives the 4-bit width and 7.5.2 the byte-wise arithmetic, but
+    // the standard never says how the nibble becomes a byte and prints no worked
+    // M1/M3 example. The convention is the field's, and it was verified in KG-12
+    // against two independent implementations — zxing-cpp 3.1.1 and segno 1.6.6
+    // both emit exactly this symbol, module for module. See
+    // `handoff/REVIEW-REQUEST-interop.md`.
+    //
+    // Annex N.1's "The first 4-bit data codeword is prefixed with 0000" is about
+    // QR code model 1 and its LEADING partial codeword, not this trailing one;
+    // both are the same byte-alignment rule seen from opposite ends.
     //
     // "1234" cannot detect the difference — its half codeword is 0000, which is
     // the same byte either way. "12345" can:
@@ -231,23 +242,25 @@ fn half_codeword_enters_reed_solomon_zero_prefixed() {
     //   "45" as a 2-digit remainder in 7 bits             -> 0101101
     //   20 bits exactly, so the terminator is omitted (7.4.10)
     //   101 0001111011 0101101 -> 10100011 11011010 1101
-    // The half codeword is 1101, so it reaches Reed-Solomon as 0x0D, not 0xD0.
+    // The half codeword is 1101, so it reaches Reed-Solomon as 0xD0, not 0x0D.
     let symbol = encode_micro(b"12345", options(MicroEcLevel::Detection, None, None)).unwrap();
     let (info, mask) = read_format(&symbol);
     let (data, ec) = to_codewords(&extract_bits(&symbol, MicroVersion::M1, mask), &info);
 
-    assert_eq!(data, [0xA3, 0xDA, 0x0D]);
+    assert_eq!(data, [0xA3, 0xDA, 0xD0]);
     assert_eq!(
-        data[2] & 0xF0,
+        data[2] & 0x0F,
         0,
-        "the half codeword is zero-prefixed, so its high nibble is clear"
+        "the half codeword is left-justified, so its low nibble is clear"
     );
     // Pinned literally, not via rs_encode over the extracted data, so that the
-    // error correction codewords themselves are the thing under test: the
-    // zero-suffixed reading would give [0x6E, 0xC7] here.
-    assert_eq!(ec, [0x14, 0x60]);
-    assert_eq!(ec, rs_encode(&[0xA3, 0xDA, 0x0D], 2));
-    assert_ne!(ec.as_slice(), rs_encode(&[0xA3, 0xDA, 0xD0], 2).as_slice());
+    // error correction codewords themselves are the thing under test. Derived by
+    // hand: g(x) = x^2 + 3x + 2, and dividing A3 x^4 + DA x^3 + D0 x^2 by it over
+    // GF(256)/0x11D leaves 6E x + C7. The zero-prefixed reading would give
+    // [0x14, 0x60] here, which is what this crate emitted before KG-12.
+    assert_eq!(ec, [0x6E, 0xC7]);
+    assert_eq!(ec, rs_encode(&[0xA3, 0xDA, 0xD0], 2));
+    assert_ne!(ec.as_slice(), rs_encode(&[0xA3, 0xDA, 0x0D], 2).as_slice());
 }
 
 #[test]

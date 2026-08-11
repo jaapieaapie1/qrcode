@@ -121,8 +121,10 @@ fn decode_micro_oriented(matrix: &BitMatrix) -> Result<DecodedMicro, DecodeError
 
     let block = read_block(matrix, &info, mask);
     let (codewords, errors_corrected) = correct_block(block, &info)?;
-    let stream = data_bit_stream(&codewords, &info);
-    let bytes = parse_micro_segments(&stream, &info).ok_or(DecodeError::Malformed)?;
+    // No repacking between codewords and bit stream: every codeword is stored
+    // MSB-first from bit 7, and the M1/M3 half codeword is left-justified, so
+    // the data codewords already are the `data_bits`-long stream with no gap.
+    let bytes = parse_micro_segments(&codewords, &info).ok_or(DecodeError::Malformed)?;
     let text = String::from_utf8(bytes.clone()).ok();
 
     Ok(DecodedMicro {
@@ -148,10 +150,11 @@ fn codeword_bits(info: &MicroSymbolInfo, index: usize) -> u32 {
 /// Walks the shared placement iterator, un-masking each module, and packs the
 /// result into the symbol's single Reed-Solomon block.
 ///
-/// The 4-bit final data codeword of M1 and M3 is zero-extended into the low
-/// nibble of its byte, matching the "prefixed with 0000" convention ISO states
-/// for the analogous short codeword in Annex N; every other codeword is a
-/// plain byte.
+/// Every codeword is filled MSB-first from bit 7 down, so the 4-bit final data
+/// codeword of M1 and M3 lands **left-justified**: its four bits occupy the high
+/// nibble and the low nibble stays zero. That is the byte Reed-Solomon operates
+/// on, matching what zxing-cpp and segno emit — see [`correct_block`] and
+/// `handoff/REVIEW-REQUEST-interop.md` (KG-12).
 fn read_block(m: &BitMatrix, info: &MicroSymbolInfo, mask: u8) -> Vec<u8> {
     let total = info.total_codewords as usize;
     let mut block = vec![0u8; total];
@@ -164,7 +167,10 @@ fn read_block(m: &BitMatrix, info: &MicroSymbolInfo, mask: u8) -> Vec<u8> {
         }
         let width = codeword_bits(info, index);
         if m.get(x, y) ^ micro_mask_bit(mask, x, y) {
-            block[index] |= 1 << (width - 1 - bit);
+            // Bit 7 down, never `width - 1` down: a 4-bit codeword is
+            // left-justified, so its first module is bit 7 and its last is
+            // bit 4.
+            block[index] |= 1 << (7 - bit);
         }
         bit += 1;
         if bit == width {
@@ -209,29 +215,15 @@ fn correct_block(
         fixed
     };
 
-    // The half codeword is only ever four bits wide, so a corrected value with
-    // anything in its high nibble is a mis-correction rather than a recovery.
-    if info.has_half_final_data_codeword() && block[data_len - 1] & 0xF0 != 0 {
+    // The half codeword is only ever four bits wide and is carried
+    // left-justified (`nibble << 4`), so a corrected value with anything in its
+    // low nibble is a mis-correction rather than a recovery.
+    if info.has_half_final_data_codeword() && block[data_len - 1] & 0x0F != 0 {
         return Err(DecodeError::BlockCorrection);
     }
 
     block.truncate(data_len);
     Ok((block, corrected))
-}
-
-/// Repacks the corrected data codewords into a contiguous MSB-first bit stream.
-///
-/// For M1 and M3 the final codeword holds its four bits in the low nibble; the
-/// bit stream needs them at the top of the trailing byte so that a plain
-/// MSB-first reader walks `data_bits` bits without a gap.
-fn data_bit_stream(codewords: &[u8], info: &MicroSymbolInfo) -> Vec<u8> {
-    let mut stream = codewords.to_vec();
-    if info.has_half_final_data_codeword()
-        && let Some(last) = stream.last_mut()
-    {
-        *last <<= 4;
-    }
-    stream
 }
 
 /// Parses the micro data bit stream into its payload bytes.

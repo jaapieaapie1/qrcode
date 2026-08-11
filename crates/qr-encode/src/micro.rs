@@ -138,13 +138,15 @@ fn qr_mode(mode: MicroMode) -> Mode {
 /// Selects the most compact mode that is available in `version` and can
 /// represent every byte of `data`, or `None` if there is none.
 ///
-/// [`MicroMode::Kanji`] is never selected: [`segment::mode_supports`] rejects
-/// [`Mode::Kanji`], so byte mode is chosen for such payloads wherever it is
-/// available.
+/// [`MicroMode::Kanji`] is never selected — Micro QR Kanji encoding is a
+/// documented Known Gap — so byte mode is chosen for Shift-JIS payloads
+/// wherever it is available.
 fn select_mode(data: &[u8], version: MicroVersion) -> Option<MicroMode> {
-    MicroMode::ALL
-        .into_iter()
-        .find(|&mode| mode.is_available(version) && segment::mode_supports(qr_mode(mode), data))
+    MicroMode::ALL.into_iter().find(|&mode| {
+        mode != MicroMode::Kanji
+            && mode.is_available(version)
+            && segment::mode_supports(qr_mode(mode), data)
+    })
 }
 
 /// Total data bits (mode indicator + character count + payload) for `len`
@@ -204,14 +206,27 @@ fn resolve(
 /// Assembles the padded data-codeword stream for a micro symbol.
 ///
 /// The returned slice has [`MicroSymbolInfo::data_codewords`] entries. For M1 and
-/// M3 the final entry is the 4-bit half codeword as a **value** in `0..=15`: its
-/// high nibble is zero, because a 4-bit codeword enters Reed-Solomon
-/// zero-prefixed, following the ISO Annex N.1 precedent for the other 4-bit
-/// codeword the standard defines ("The first 4-bit data codeword is prefixed
-/// with 0000 to make its length 8 bits for generating the error correction
-/// codewords"). Only those 4 low bits are written into the symbol, and their
-/// order in the module stream is unchanged by the prefixing
-/// (ISO 7.4.11, 7.7.3).
+/// M3 the final entry is the 4-bit half codeword **left-justified**: its four
+/// bits occupy the high nibble and the low nibble is zero, so the byte handed to
+/// Reed-Solomon is `nibble << 4`.
+///
+/// ISO 7.4.11 defines the final data codeword of M1 and M3 as 4 bits wide, and
+/// 7.5.2 defines Reed-Solomon as byte-wise arithmetic, but the standard never
+/// says how the nibble is widened to a byte and prints no worked M1/M3 example.
+/// The convention is therefore set by the field, and it is left-justified: two
+/// independent implementations — zxing-cpp 3.1.1 (C++) and segno 1.6.6 (Python)
+/// — emit byte-identical M1 and M3 symbols under it. See
+/// `handoff/REVIEW-REQUEST-interop.md` (KG-12) for the verification.
+///
+/// Annex N.1's "The first 4-bit data codeword is prefixed with 0000 to make its
+/// length 8 bits for generating the error correction codewords" describes QR
+/// code *model 1*, and its *leading* partial codeword — not this trailing one.
+/// Read as a byte-alignment rule the two agree: the message stream is packed
+/// MSB-first, so the unused bit positions at a codeword boundary are zero, on
+/// the left of a leading partial codeword and on the right of a trailing one.
+///
+/// Only the four significant bits are written into the symbol, most significant
+/// first, so the module order is unaffected by the widening (ISO 7.7.3).
 ///
 /// Returns `None` only if `mode` is unavailable in the symbol's version, which
 /// [`resolve`] has already excluded.
@@ -259,22 +274,18 @@ fn build_data_codewords(data: &[u8], mode: MicroMode, info: &MicroSymbolInfo) ->
         buf.push_bit(false);
     }
 
-    let mut codewords = buf.into_bytes();
-    if half && let Some(last) = codewords.last_mut() {
-        // MSB-first packing leaves the half codeword's 4 bits in the high nibble
-        // of the final byte. Shift it down so the codeword is the value the
-        // Reed-Solomon step expects, zero-prefixed rather than zero-suffixed.
-        *last >>= 4;
-    }
-    Some(codewords)
+    // MSB-first packing already leaves the half codeword's 4 bits in the high
+    // nibble of the final byte with a zero low nibble, which is exactly the
+    // left-justified byte Reed-Solomon takes. No repacking needed.
+    Some(buf.into_bytes())
 }
 
 /// Packs the module bit stream: every data codeword followed by every error
 /// correction codeword, MSB first, with the M1/M3 final data codeword
-/// contributing only 4 bits — its low four, since it is held as a value in
-/// `0..=15`. The zero prefix it carries for the Reed-Solomon step is not written
-/// into the symbol, so the module order is exactly the four bits of the
-/// codeword, most significant first.
+/// contributing only 4 bits — its high four, since it is held left-justified
+/// (`nibble << 4`) for the Reed-Solomon step. The zero low nibble that widening
+/// adds is not written into the symbol, so the module order is exactly the four
+/// significant bits of the codeword, most significant first.
 ///
 /// The result is `MicroVersion::data_modules` bits long, packed into bytes.
 fn build_module_stream(data_codewords: &[u8], ec_codewords: &[u8], half: bool) -> Vec<u8> {
@@ -282,7 +293,7 @@ fn build_module_stream(data_codewords: &[u8], ec_codewords: &[u8], half: bool) -
     let last = data_codewords.len().saturating_sub(1);
     for (i, &codeword) in data_codewords.iter().enumerate() {
         if half && i == last {
-            buf.push_bits(codeword as u32, 4);
+            buf.push_bits((codeword >> 4) as u32, 4);
         } else {
             buf.push_bits(codeword as u32, 8);
         }

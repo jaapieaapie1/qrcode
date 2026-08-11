@@ -17,7 +17,7 @@ activates on first push (NO REMOTE CONFIGURED YET).
 ## What Was Decided This Session (Wave 4)
 
 - `micro` feature default-on everywhere, forwarded (`micro = ["qr-core/micro"]`); parallel types (MicroVersion, MicroEcLevel incl. Detection, encode_micro/decode_micro/detect_micro/detect_all)
-- M1/M3 half codeword: LOW nibble zero-prefixed into RS (ISO Annex N.1 precedent) — EC difference pinned by test both ways
+- M1/M3 half codeword: HIGH nibble / LEFT-JUSTIFIED into RS (KG-12 interop verification REFUTED the earlier low-nibble ruling — zxing-cpp + segno agree bit-exact; Annex N.1 describes a LEADING partial codeword padding left, ours is trailing). Golden external vectors pinned in tests-integration/tests/micro_golden.rs
 - ISO 7.5.1 misdecode caps enforced on BOTH QR and micro paths (Step 5f; behavior change for 1-L/1-M/2-L — release-note material)
 - Binarize adaptive radius /16→/8 (micro-only bug fix); vignette cost pinned at depth 0.85; two-pass binarize = KG-11
 - MAX_FUNCTION_MISMATCHES = 1, bracketed by test

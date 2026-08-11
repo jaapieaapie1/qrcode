@@ -136,6 +136,11 @@ fn segment_bits(info: &MicroSymbolInfo, mode: MicroMode, data: &[u8]) -> Bits {
 /// abbreviated to whatever room is left; zero bits pad to the next codeword
 /// boundary; remaining codewords are `0xEC` and `0x11` alternately, and the
 /// 4-bit final codeword of M1/M3 pads as `0000`.
+///
+/// Every codeword is packed MSB-first from bit 7, so the 4-bit final codeword of
+/// M1/M3 comes out left-justified (`nibble << 4`) — the byte Reed-Solomon takes.
+/// See `handoff/REVIEW-REQUEST-interop.md` for why that, and not the
+/// zero-prefixed reading, is the interoperable convention.
 fn pad_to_codewords(mut bits: Bits, info: &MicroSymbolInfo) -> Vec<u8> {
     let capacity = info.data_bits as usize;
     assert!(bits.len() <= capacity, "fixture overflows the symbol");
@@ -184,7 +189,7 @@ fn pad_to_codewords(mut bits: Bits, info: &MicroSymbolInfo) -> Vec<u8> {
             let mut value = 0u8;
             for bit in 0..width {
                 if bits.0.get(pos + bit).copied().unwrap_or(false) {
-                    value |= 1 << (width - 1 - bit);
+                    value |= 1 << (7 - bit);
                 }
             }
             codewords.push(value);
@@ -242,7 +247,9 @@ fn build_symbol(info: &MicroSymbolInfo, mask: u8, data: &[u8]) -> BitMatrix {
     let mut placed = 0u32;
     for (x, y) in micro_data_modules(version) {
         let w = width(index);
-        let value = (block[index] >> (w - 1 - bit)) & 1 == 1;
+        // Bit 7 down, never `w - 1` down: the M1/M3 half codeword is carried
+        // left-justified, so its four modules are bits 7..4 of the byte.
+        let value = (block[index] >> (7 - bit)) & 1 == 1;
         m.set(x, y, value ^ micro_mask_bit(mask, x, y));
         bit += 1;
         if bit == w {
