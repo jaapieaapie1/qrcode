@@ -25,9 +25,12 @@ activates on first push (NO REMOTE CONFIGURED YET).
 
 ## Still Open
 
-- No git remote — push to GitHub to activate CI
-- KG-4 (Kanji SJIS→UTF-8, structured append), KG-6 (mixed-mode/Kanji/ECI encode), KG-7 (full alignment grid), KG-9 (estimator bias 35–40°), KG-11 (two-pass binarize), KG-12 (M1/M3 nibble interop vs external decoder), KG-13 (bridged-timing crop), KG-14 (hardcoded micro map in detect)
-- MicroOptions has no forced-mode field (accepted)
+- KG-4 (Kanji SJIS→UTF-8 decode text, structured append), KG-7 (full alignment grid for severe perspective), KG-9 (estimator bias 35–40° v20+), KG-13 (bridged-timing crop), KG-14 (hardcoded micro map), KG-15 (qr-video decodable fixture), KG-16 (multi-code vignette retry limit, accepted)
+- MicroOptions has no forced-mode field (accepted); Options not non_exhaustive (revisit at crates.io publish)
+- No LICENSE files despite MIT OR Apache-2.0 in Cargo.toml — add before going public
+- GitHub server-side gc pending for full ISO-PDF purge (history rewritten 2026-08-11) — ask GitHub Support before flipping public
+
+CLOSED this session: KG-6 (DP segmentation + opt-in Kanji + ECI, 7f75a0b), KG-11 (layered binarize retry, 627c69e), KG-12 (nibble convention REFUTED + fixed both sides + golden vectors, 0c36cdc). Repo: github.com/jaapieaapie1/qrcode (private), CI green.
 
 ---
 
