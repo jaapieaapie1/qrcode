@@ -304,6 +304,7 @@ window.addEventListener('resize', () => {
 let downloadUrl = null;
 let downloadPngUrl = null;
 let genTimer = 0;
+let genSeq = 0;
 
 const downloadPng = el('download-png');
 const copyPng = el('copy-png');
@@ -409,13 +410,17 @@ async function regenerate() {
   download.href = downloadUrl;
   const stem = genMicro.checked ? 'microqr' : 'qrcode';
   download.download = `${stem}.svg`;
+  download.hidden = false;
 
-  // PNG export: rasterized once per (debounced) regeneration. A stale result
-  // from a slow rasterize is guarded by comparing against the live SVG.
+  // PNG export: rasterized once per (debounced) regeneration. The sequence
+  // number drops a slow rasterize that finishes after a newer regeneration.
+  // (Comparing genOut.innerHTML to the SVG string does NOT work: setting
+  // innerHTML normalizes the markup, so they never compare equal.)
+  const seq = ++genSeq;
   clearPngExports();
   try {
     const blob = await svgToPngBlob(svg);
-    if (genOut.innerHTML !== svg) return; // regenerated meanwhile
+    if (seq !== genSeq) return; // regenerated meanwhile
     downloadPngUrl = URL.createObjectURL(blob);
     downloadPng.href = downloadPngUrl;
     downloadPng.download = `${stem}.png`;
@@ -428,7 +433,6 @@ async function regenerate() {
   } catch {
     // PNG export is a convenience; the SVG link above still works.
   }
-  download.hidden = false;
 }
 
 copyPng.addEventListener('click', async () => {
