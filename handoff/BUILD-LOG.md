@@ -88,6 +88,39 @@ Key decisions:
 
 See handoff/REVIEW-REQUEST.md for full detail. Ready for Richard.
 
+### Step 8 — browser demo (WASM) — BUILT, AWAITING REVIEW
+*Date: 2026-08-11 — Bob-W*
+
+Files changed:
+- `Cargo.toml` — `exclude = ["esp-selftest", "demo-wasm"]` only; no other root edit
+- `.gitignore` — ignore generated `demo-wasm/www/pkg/`
+- `demo-wasm/` — NEW, outside the workspace: cdylib + `wasm-bindgen`, two exports
+  (`scan(luma, w, h) -> JSON string`, `generate(text, ec, micro) -> SVG or "ERROR: …"`).
+  Deps: path deps on qr-core/qr-encode/qr-render/qr-detect + wasm-bindgen. No
+  web-sys, no serde — JSON hand-written, luma computed in JS, raw buffers only.
+- `demo-wasm/www/` — index.html + app.js + style.css, no framework/CDN/bundler.
+  Camera scan loop (rAF throttled to ~10 fps, 720 px longest edge), corner
+  overlay incl. located-but-unreadable symbols, distinct-payload list with
+  timestamps, file-input path for camera-less testing; live SVG generation with
+  EC select, Micro checkbox, inline errors, download link.
+- `demo-wasm/README.md` — build (wasm-pack, with a wasm-bindgen-cli fallback),
+  serve, WASM API reference.
+- `.github/workflows/ci.yml` — new `demo-build` job: pinned wasm-pack tarball,
+  fmt + clippy for the excluded crate, `wasm-pack build --target web`, asset
+  wiring check. No browser test.
+
+Key decisions: EC is never silently downgraded — Micro + `H` is a readable
+error, and `D` (M1 detection-only) is exposed as a micro-only selection so all
+of M1–M4 is reachable. Undecodable candidates are returned with corners so the
+overlay can show "found but unreadable".
+
+Verified: wasm-pack build clean; demo fmt + clippy clean; `cargo test
+--workspace` green; `esp-selftest` release build green; 21-assertion headless
+node round trip through the real wasm binary (generate → rasterise SVG → scan)
+ALL PASS; `python3 -m http.server` serves every asset (wasm as
+`application/wasm`). Camera/UI interaction is unverified — needs a real browser.
+See handoff/REVIEW-REQUEST-demo.md.
+
 ### Step 7 — ESP32-class execution test in CI — REVIEWED CLEAR, ROUND-2 FIXES APPLIED
 *Date: 2026-08-11 — Bob-E32 (Richard-E32: CLEAR, 0 BLOCKER / 1 MAJOR / 8 MINOR — all addressed)*
 

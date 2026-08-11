@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR + Micro QR — WebAssembly demo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>QR + Micro QR</h1>
+  <p class="sub">A from-scratch Rust encoder, renderer and detector, compiled to WebAssembly. No JavaScript QR library, no CDN.</p>
+</header>
+
+<main>
+
+  <section id="scan-section">
+    <h2>Scan</h2>
+
+    <div class="controls">
+      <button id="start-cam" type="button">Start camera</button>
+      <button id="stop-cam" type="button" disabled>Stop</button>
+      <label class="file-btn">
+        Scan an image file
+        <input id="file-input" type="file" accept="image/*">
+      </label>
+    </div>
+
+    <div id="stage">
+      <video id="video" playsinline muted hidden></video>
+      <canvas id="preview" hidden></canvas>
+      <canvas id="overlay"></canvas>
+      <p id="stage-hint">Start the camera, or pick an image file.</p>
+    </div>
+
+    <p id="scan-status" role="status"></p>
+
+    <h3>Decoded</h3>
+    <ul id="results" class="results"><li class="empty">Nothing scanned yet.</li></ul>
+  </section>
+
+  <section id="generate-section">
+    <h2>Generate</h2>
+
+    <div class="gen-grid">
+      <div class="gen-input">
+        <label for="gen-text">Text</label>
+        <textarea id="gen-text" rows="5" spellcheck="false">https://example.com</textarea>
+
+        <div class="gen-opts">
+          <label for="gen-ec">Error correction</label>
+          <select id="gen-ec">
+            <option value="L">L — ~7%</option>
+            <option value="M" selected>M — ~15%</option>
+            <option value="Q">Q — ~25%</option>
+            <option value="H">H — ~30%</option>
+            <option value="D" disabled hidden>D — detect only (Micro M1)</option>
+          </select>
+
+          <label class="check"><input id="gen-micro" type="checkbox"> Micro QR</label>
+        </div>
+
+        <p id="gen-error" class="error" hidden></p>
+      </div>
+
+      <div class="gen-output">
+        <div id="gen-out" class="code-frame"></div>
+        <a id="download" class="download" download="qrcode.svg" hidden>Download SVG</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <p>Detection, decoding, encoding and SVG rendering all run in WebAssembly. Camera frames never leave the page.</p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

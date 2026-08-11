@@ -1,4 +1,5 @@
 target/
+demo-wasm/www/pkg/
 *.png.tmp
 _temp/
 generated-images/

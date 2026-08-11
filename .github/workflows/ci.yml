@@ -60,6 +60,41 @@ jobs:
       - name: All crates on wasm32
         run: cargo check -p qr-core -p qr-encode -p qr-decode -p qr-detect -p qr-render -p qr-video --target wasm32-unknown-unknown
 
+  demo-build:
+    name: Browser demo (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: demo-wasm
+      - name: Install wasm-pack
+        run: |
+          curl -sSfL https://github.com/rustwasm/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin --wildcards '*/wasm-pack'
+          wasm-pack --version
+      # demo-wasm is excluded from the workspace, so neither the `lint` job's
+      # `cargo fmt --all` nor its `cargo clippy --workspace` can see it.
+      - name: fmt
+        working-directory: demo-wasm
+        run: cargo fmt --check
+      - name: Clippy
+        working-directory: demo-wasm
+        run: cargo clippy --release --target wasm32-unknown-unknown -- -D warnings
+      - name: Build demo to wasm + JS bindings
+        working-directory: demo-wasm
+        run: wasm-pack build --release --target web --out-dir www/pkg
+      - name: Check the page's assets point at the build output
+        working-directory: demo-wasm/www
+        run: |
+          test -f pkg/qr_demo.js
+          test -f pkg/qr_demo_bg.wasm
+          grep -q "./pkg/qr_demo.js" app.js
+
   esp32-emulation:
     name: ESP32-class execution (QEMU riscv32)
     runs-on: ubuntu-latest

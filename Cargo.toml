@@ -11,7 +11,9 @@ members = [
 ]
 # Bare-metal QEMU self-test: builds only for riscv32imc-unknown-none-elf and
 # links a linker script, so it must not join the host-target workspace builds.
-exclude = ["esp-selftest"]
+# The browser demo is a wasm32 cdylib with a wasm-bindgen dependency; keeping it
+# out of the workspace keeps that dependency out of the product crates' graph.
+exclude = ["esp-selftest", "demo-wasm"]
 
 [workspace.package]
 version = "0.1.0"

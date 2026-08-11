@@ -1,0 +1,25 @@
+[package]
+name = "qr-demo"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Browser demo only: a cdylib for wasm-bindgen. Excluded from the root
+# workspace so the demo's wasm-bindgen dependency never enters the product
+# crates' dependency graph or their host-target builds.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+qr-core = { path = "../crates/qr-core" }
+qr-encode = { path = "../crates/qr-encode" }
+qr-render = { path = "../crates/qr-render" }
+qr-detect = { path = "../crates/qr-detect" }
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
