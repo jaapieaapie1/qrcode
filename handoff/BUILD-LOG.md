@@ -154,15 +154,17 @@ See handoff/REVIEW-REQUEST-esp-selftest.md.
 - **KG-3** — CLOSED by Step 3b (Annex I EC bytes pinned to PDF values, verified by Richard-I against §I.2.3)
 - **KG-4** — decode: Kanji exposed as raw Shift-JIS bytes, no SJIS→UTF-8 table; structured append parsed-and-skipped, not reassembled — logged 2026-07-23
 - **KG-5** — CLOSED by Step 3b (border clamping + full_scan_interval cadence + ROI-miss fallback tests)
-- **KG-6** — encode: single-mode segmentation only (no greedy mixed-mode), no Kanji/ECI encoder-side — logged 2026-07-23
+- **KG-6** — CLOSED 2026-08-11 (7f75a0b): optimal DP mixed-mode segmentation (brute-force verified), Kanji opt-in via Options.assume_shift_jis (default off — UTF-8 CJK stays byte mode), ECI designators. Richard: round 2 CLEAR, zero outstanding
 - **KG-7** — detect: severe perspective on high versions uses single BR alignment anchor, not full interior alignment grid — logged 2026-07-23
 - **KG-8** — PARTIALLY CLOSED by Step 5a: qr-core micro foundation built behind the default-on `micro` feature (tables, format info, 4 masks, function map, placement iterator). Encode/decode/detect remain unsupported until Steps 5b–5d. Original entry: Micro QR (M1–M4) unsupported across all crates. ISO 18004:2024 includes it (sizes 9+2*M, single finder, own format-info/EC/mode tables; M1 numeric-only). Cleanly additive to current design; detect needs a single-finder algorithm. If built: `micro` cargo feature, parallel types (no shared Symbol enum). Awaiting Project Owner decision — logged 2026-07-23
 - **KG-9** — detect: rotation envelope for large versions at steep angles (v20/v40 fail 35–40°, pass 45°) is bounded by the module estimator's own +6–8% high bias in the mixed chord-taper regime (Richard-F measured; NOT a raster precision floor). Next lever: filter corner-tapered scanlines before averaging — logged 2026-07-23
 - **KG-10** — qr-detect not rustfmt-clean prior to Step 4; fmt applied in Step 4 commit — logged 2026-07-23
-- **KG-11** — binarize: single-window adaptive threshold at /8 radius trades vignette robustness (low-contrast frame corners) for large-module support; two-pass binarize (multi-scale) is the proper fix — logged 2026-08-10
-- **KG-12** — micro half-codeword nibble convention (low, zero-prefixed) rests on ISO Annex N.1 precedent; no worked M1/M3 ISO example exists — verify interop against an external reference decoder (zxing-cpp) when practical — logged 2026-08-10
+- **KG-11** — CLOSED 2026-08-11 (627c69e): layered retry — /8 primary, /16 full-frame rescan when nothing decodes (decode-aware trigger, feature-graded). Vignette to 0.97 QR / >=0.999 micro via public entry points; happy path 1.01x. Per-pixel two-scale discriminators measured unsound and rejected. 3 review rounds
+- **KG-12** — CLOSED 2026-08-11 (0c36cdc): interop verification REFUTED the low-nibble convention — segno + zxing-cpp both left-justify (nibble<<4). Fixed both sides; 40/40 both directions; golden external vectors pinned in tests-integration/tests/micro_golden.rs
 - **KG-13** — micro detect: a bridged timing module can truncate a symbol into a self-consistent smaller crop scoring 0 function mismatches (Richard-MT observation); rare, needs a discriminator beyond function-pattern validation — logged 2026-08-10
 - **KG-14** — micro detect: function_mismatches hardcodes the micro function map, tied to qr-core only by debug_assert — logged 2026-08-10
+- **KG-15** — qr-video: fixtures never decode, so its suite only exercises the retry double-pass path; detect_full single-pass-hit case uncovered. Add one decodable fixture next time in that crate (Richard-BIN MINOR-6) — logged 2026-08-11
+- **KG-16** — detect: multi-code vignette frame where /8 finds one code suppresses retry for a second code needing /16 — documented crate-docs limitation, accepted — logged 2026-08-11
 
 ---
 
