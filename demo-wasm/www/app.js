@@ -319,10 +319,26 @@ function syncEcOptions() {
 
 async function regenerate() {
   if (!(await ready)) return;
+
+  // An empty box is the neutral starting state, not a user mistake: show the
+  // placeholder frame and no error.
+  if (genText.value.length === 0) {
+    genOut.replaceChildren();
+    genOut.hidden = false;
+    genError.hidden = true;
+    download.hidden = true;
+    if (downloadUrl) {
+      URL.revokeObjectURL(downloadUrl);
+      downloadUrl = null;
+    }
+    return;
+  }
+
   const svg = generate(genText.value, genEc.value, genMicro.checked);
 
   if (svg.startsWith('ERROR:')) {
     genOut.replaceChildren();
+    genOut.hidden = true;
     genError.textContent = svg.slice('ERROR:'.length).trim();
     genError.hidden = false;
     download.hidden = true;
@@ -334,6 +350,7 @@ async function regenerate() {
   }
 
   genError.hidden = true;
+  genOut.hidden = false;
   // The SVG comes from the renderer in this page's own wasm module, not from
   // user input, so injecting it as markup is safe.
   genOut.innerHTML = svg;

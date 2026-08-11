@@ -224,7 +224,19 @@ pub fn generate(text: &str, ec: &str, micro: bool) -> String {
         match micro_ec(ec) {
             Ok(level) => match encode_micro(data, MicroOptions::new(level)) {
                 Ok(m) => m,
-                Err(e) => return format!("ERROR: {e}"),
+                Err(e) => {
+                    // The generic encoder error is technically right but
+                    // unhelpful for the two selections with narrow payload
+                    // rules; explain the actual constraint instead.
+                    let digits_only = data.iter().all(u8::is_ascii_digit);
+                    if level == qr_core::micro::MicroEcLevel::Detection && !digits_only {
+                        return "ERROR: D (detect only) means Micro M1, and M1 \
+                                carries digits only - use 0-9, or pick another \
+                                error correction level."
+                            .to_string();
+                    }
+                    return format!("ERROR: {e}");
+                }
             },
             Err(msg) => return msg,
         }
