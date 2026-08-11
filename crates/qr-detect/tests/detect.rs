@@ -137,12 +137,23 @@ impl Gray {
 /// Renders a module grid to grayscale: `scale` px per module, `quiet` modules of
 /// white border. Dark modules -> 0, light -> 255.
 fn render(m: &BitMatrix, scale: u32, quiet: u32) -> Gray {
+    render_contrast(m, scale, quiet, 0)
+}
+
+/// [`render`] with the dark modules at an arbitrary luma instead of 0, i.e. at
+/// arbitrary print contrast.
+///
+/// Ink is never actually black. Worn thermal print reflects around 0.55 of the
+/// paper, putting a dark module at luma 140 rather than 0, and a binarization
+/// rule that keys off how *dark* a feature is rather than how *big* it is will
+/// pass every luma-0 fixture in this file and still fail on real print.
+fn render_contrast(m: &BitMatrix, scale: u32, quiet: u32, dark: u8) -> Gray {
     let dim = m.size();
     let side = (dim + 2 * quiet) * scale;
     let mut g = Gray::new(side, side, 255);
     for y in 0..dim {
         for x in 0..dim {
-            let v = if m.get(x, y) { 0 } else { 255 };
+            let v = if m.get(x, y) { dark } else { 255 };
             for py in 0..scale {
                 for px in 0..scale {
                     g.set((quiet + x) * scale + px, (quiet + y) * scale + py, v);
@@ -504,4 +515,115 @@ fn decode_field_present_and_graceful() {
     let dets = detect_luma(&g.px, g.w, g.h);
     assert_eq!(dets.len(), 1);
     assert!(dets[0].decoded.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Illumination: the primary pass and the retry pass
+// ---------------------------------------------------------------------------
+
+/// Renders `m` at `scale` px/module into the corner of a 1280x720 camera frame
+/// under a radial vignette, at worn-thermal-print contrast (dark modules reflect
+/// 0.55 of the light ones).
+///
+/// `depth` is the vignette depth: illumination falls as `1 - depth*(r/r_max)^2`
+/// from the frame centre, so at 0.90 the corner sits at a tenth of the centre's
+/// light. The symbol goes near a corner deliberately — that is where the
+/// adaptive window is clamped against the border *and* the illumination curves
+/// inside it, which is the combination the window radius has to cope with.
+fn vignetted_frame(m: &BitMatrix, scale: u32, depth: f64) -> Gray {
+    let (w, h) = (1280u32, 720u32);
+    let (ox, oy) = (40u32, 40u32);
+    let span = m.size() * scale;
+    let cx = (w - 1) as f64 / 2.0;
+    let cy = (h - 1) as f64 / 2.0;
+    let r_max = (cx * cx + cy * cy).sqrt();
+
+    let mut g = Gray::new(w, h, 255);
+    for y in 0..h {
+        for x in 0..w {
+            let (dx, dy) = (x as f64 - cx, y as f64 - cy);
+            let r = (dx * dx + dy * dy).sqrt() / r_max;
+            let illumination = 1.0 - depth * r * r;
+            let mut reflectance = 1.0f64;
+            if x >= ox
+                && y >= oy
+                && x < ox + span
+                && y < oy + span
+                && m.get((x - ox) / scale, (y - oy) / scale)
+            {
+                reflectance = 0.55;
+            }
+            g.set(
+                x,
+                y,
+                (255.0 * illumination * reflectance)
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+            );
+        }
+    }
+    g
+}
+
+#[test]
+fn a_shallow_vignette_is_handled_by_the_primary_pass() {
+    // The envelope the primary window radius holds on its own, and the reason
+    // the retry is not simply always-on: this frame costs one binarization.
+    let m = synth_matrix(2);
+    let g = vignetted_frame(&m, 3, 0.85);
+    assert_eq!(
+        qr_detect::detect_luma_single_pass(&g.px, g.w, g.h).len(),
+        1,
+        "the primary pass must still hold a 0.85-depth vignette"
+    );
+    assert_recovers(&g, &m, "vignette 0.85");
+}
+
+#[test]
+fn a_deep_vignette_is_recovered_by_the_retry_pass() {
+    // Past the primary's envelope. `detect_luma_single_pass` is the control:
+    // that it comes back empty while `detect_luma` recovers the symbol
+    // module-for-module is what proves the second pass ran and did the work.
+    //
+    // Both halves matter. Without the first assertion, a future change that let
+    // the primary handle this frame would leave the retry path silently
+    // untested while this test kept passing.
+    let m = synth_matrix(2);
+    let g = vignetted_frame(&m, 3, 0.90);
+    assert!(
+        qr_detect::detect_luma_single_pass(&g.px, g.w, g.h).is_empty(),
+        "primary pass unexpectedly succeeded; the retry is no longer under test here"
+    );
+    assert_recovers(&g, &m, "vignette 0.90 via retry");
+}
+
+// ---------------------------------------------------------------------------
+// Print contrast
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_qr_symbol_survives_worn_print_contrast() {
+    // Regression lock from the KG-11 round-1 review. A candidate binarization
+    // that deferred to a wider window based on how dark a feature was, rather
+    // than how large, lost this symbol at reflectance 0.60 while every luma-0
+    // fixture in this file stayed green.
+    //
+    // Six px per module is the small end of what a camera frame gives, so the
+    // finder cores here are 18 px against a 168 px image — comfortably inside a
+    // narrow adaptive window, which is what makes the case sharp.
+    //
+    // The primary pass must carry all of these on its own: reaching the retry
+    // for ordinary print would mean paying two binarizations for the common
+    // case, which is the opposite of what the retry is for.
+    let m = synth_matrix(2);
+    for refl in [0.0f64, 0.20, 0.30, 0.40, 0.45, 0.55, 0.60] {
+        let dark = (255.0 * refl).round() as u8;
+        let g = render_contrast(&m, 6, 4, dark);
+        assert_eq!(
+            qr_detect::detect_luma_single_pass(&g.px, g.w, g.h).len(),
+            1,
+            "reflectance {refl}: primary pass must recover the symbol"
+        );
+        assert_recovers(&g, &m, &format!("reflectance {refl}"));
+    }
 }

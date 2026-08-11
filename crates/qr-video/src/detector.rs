@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use qr_core::BitMatrix;
-use qr_detect::{Detection, Point, detect_luma};
+use qr_detect::{Detection, Point, detect_luma, detect_luma_single_pass};
 
 use crate::{EventKind, Frame, FrameSource};
 
@@ -379,18 +379,32 @@ impl VideoDetector {
 // -------------------------------------------------------------------------
 
 /// Runs full-frame detection.
+///
+/// Uses [`detect_luma`], so a frame that comes back empty gets qr-detect's retry
+/// pass at the narrower binarization window. A full scan is already the
+/// expensive path and already the one that runs on a cadence rather than every
+/// frame, so the second pass is affordable exactly here.
 fn detect_full(frame: &Frame<'_>) -> Vec<Detection> {
     detect_luma(frame.luma, frame.width, frame.height)
 }
 
 /// Runs detection inside `roi` by copying the sub-window into a contiguous
 /// buffer, then maps the resulting corners back into full-frame coordinates.
+///
+/// Single-pass deliberately. An ROI miss happens on ordinary frames — the code
+/// left the window, the tracker is one frame stale — and it happens often, so
+/// paying a second binarization for every one of them would put the retry's cost
+/// on the hot path. The retry would also be aimed wrong: inside a tight crop the
+/// symbol fills the frame and its modules are large relative to the adaptive
+/// window, which is the case the *primary* radius is the right one for. When the
+/// ROI stops producing, the cadence falls back to [`detect_full`], and that is
+/// where the second opinion is taken.
 fn detect_in_roi(frame: &Frame<'_>, roi: Roi) -> Vec<Detection> {
     let (sub, w, h) = crop(frame, roi);
     if w == 0 || h == 0 {
         return Vec::new();
     }
-    let mut dets = detect_luma(&sub, w, h);
+    let mut dets = detect_luma_single_pass(&sub, w, h);
     let ox = roi.x as f64;
     let oy = roi.y as f64;
     for det in &mut dets {
