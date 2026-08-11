@@ -6,14 +6,26 @@
 //! when the adaptive result degenerates to a single colour — we fall back to a
 //! global Otsu threshold.
 //!
-//! The window radius is a parameter, not a constant, and there are two settings
-//! of it: [`PRIMARY_WINDOW_DIV`] and [`RETRY_WINDOW_DIV`]. Neither holds every
-//! envelope. A wide window is required to keep solid features solid at any print
-//! contrast; a narrow window is required to track a steep illumination gradient.
-//! The two constraints cross rather than merely leaving a narrow band between
-//! them, so they are resolved a layer up — the pipeline binarizes at the primary
-//! radius and, only when that yields nothing at all, tries the whole frame again
-//! at the retry radius. See the crate docs for what that costs.
+//! Two things about that comparison are parameters rather than constants, and
+//! for the same reason: no single setting of either holds every envelope, and
+//! the conflicts are resolved a layer up by running the frame twice.
+//!
+//! * The **window radius** — [`PRIMARY_WINDOW_DIV`] or [`RETRY_WINDOW_DIV`]. A
+//!   wide window is required to keep solid features solid at any print contrast;
+//!   a narrow window is required to track a steep illumination gradient.
+//! * The **margin** — [`PRIMARY_MARGIN`] or [`NARROW_MARGIN`] — being how far
+//!   below its local mean a pixel must sit to count as dark. A wide margin is
+//!   required to keep sensor noise from speckling a well-lit frame; a narrow one
+//!   is required to see a symbol whose print contrast is thin. See
+//!   [`PRIMARY_MARGIN`] for the measurement that says those two cross.
+//!
+//! A third degradation, sensor noise, is not a setting of the comparison at all
+//! and is answered before it: [`denoise`] smooths the frame, on the retry rung
+//! and only when [`noise_reaches`] says there is noise to remove.
+//!
+//! The pipeline binarizes at the primary settings and, only when that yields
+//! nothing at all, runs [`binarize_retry`] over the whole frame — every one of
+//! the three moved at once. See the crate docs for what that costs.
 
 use core::ops::{Add, Mul, Sub};
 
@@ -51,6 +63,12 @@ impl Binary {
     /// The pipeline uses it to skip that pass. It is not merely "the fallback
     /// ran": when the fallback runs *because the adaptive pass came back empty*,
     /// another radius genuinely might not, and this stays false.
+    ///
+    /// The retry also changes the *margin*, and the [`can_be_dark`] condition
+    /// does depend on that, so on that arm this is a deliberate judgement rather
+    /// than a proof — see [`can_be_dark`] for why a frame narrow enough to reach
+    /// it is one the [`otsu`] fallback already answers better than any adaptive
+    /// pass would.
     #[inline]
     pub fn is_radius_invariant(&self) -> bool {
         self.radius_invariant
@@ -95,17 +113,260 @@ pub const PRIMARY_WINDOW_DIV: usize = 8;
 /// See [`tests::the_retry_window_holds_a_vignette_the_primary_loses`].
 pub const RETRY_WINDOW_DIV: usize = 16;
 
+/// The denominator every Bradley margin is expressed over.
+///
+/// Fixed at 25 rather than 100 so both margins reduce against it, which is what
+/// keeps [`fits_u32`]'s overflow bound — and therefore the accumulator-width
+/// routing — the same arithmetic it has always been.
+const MARGIN_DEN: u32 = 25;
+
+/// Margin for the primary pass: a pixel is dark when it sits at least **12%**
+/// below its local mean (`22/25`).
+///
+/// This is Bradley's own `t`, and it is the right setting for a well-lit frame:
+/// the margin is what stops sensor noise from speckling a flat region, and 12%
+/// of a paper-white local mean is ~30 luma of protection.
+///
+/// It is the wrong setting for a thin-contrast one, and measurably so. The test
+/// is *relative*, so the contrast a symbol must present to clear it scales with
+/// the background: against a background `B` with a data region about half dark,
+/// a dark module at `B - d` is only seen when `d > 0.47 * B`. At `B = 220` that
+/// is `d > 47` — so an ordinary worn or dimly-lit print at `d = 40` binarizes to
+/// nothing at all, and no amount of error correction downstream recovers a
+/// symbol whose modules were never distinguished. Measured over a 720-cell
+/// degradation grid (four symbols x three scales x three illumination models x
+/// four contrasts x five noise levels), this margin binarizes 100 cells
+/// perfectly; [`NARROW_MARGIN`] binarizes 196.
+///
+/// The two do not order, which is why both exist. Under sensor noise at *full*
+/// contrast the ranking reverses — of the 108 grid cells at the widest contrast
+/// and sigma >= 8, this margin beats the narrow one on 57. A wide margin is
+/// noise protection and a narrow margin is contrast sensitivity; a frame needs
+/// one or the other, so the pipeline tries one and then the other.
+pub const PRIMARY_MARGIN: u32 = 22;
+
+/// Margin for the retry pass: **4%** below the local mean (`24/25`).
+///
+/// Chosen by sweeping the whole margin range over the degradation grid described
+/// on [`PRIMARY_MARGIN`], which is flat across 96-97% and falls away either side
+/// — 92% is still losing thin-contrast symbols, 100% (no margin at all) has
+/// nothing left to reject noise with and drops back below both. 96% is the
+/// setting inside that plateau that reduces against [`MARGIN_DEN`].
+pub const NARROW_MARGIN: u32 = 24;
+
+/// Row stride of the [`noise_reaches`] noise estimate.
+///
+/// The statistic is a median over hundreds of thousands of samples even at this
+/// stride, and it reads the same value here as it does at stride 1 on every
+/// fixture it was calibrated against — so the remaining fifteen-sixteenths of
+/// the frame buy nothing but memory traffic on a path that is already a miss.
+const NOISE_ROW_STRIDE: usize = 16;
+
+/// Which quantile of the second difference [`noise_reaches`] reads, as a
+/// reciprocal: 4 is the lower quartile.
+///
+/// Not the median, and the reason is the one clean frame a high-frequency
+/// statistic finds hardest to call quiet. A pixel in the *interior* of a module
+/// run has a second difference of exactly zero; one on a module boundary has a
+/// large one. At `s` px/module the interior fraction is at worst `(s-2)/s` —
+/// one third at the 3 px/module the pinned deep-vignette fixture renders at, and
+/// that is the strict alternating case, with a real pseudo-random data region
+/// running higher. A median needs *half* the samples quiet and would call that
+/// frame noisy; a lower quartile needs a quarter and does not.
+///
+/// It costs nothing to read a quarter instead of a half — it is the same
+/// counter against a different fraction — and it is the whole margin the gate
+/// has on the side where being wrong is expensive.
+const NOISE_QUANTILE: u32 = 4;
+
+/// The noise floor at or above which the retry rung smooths the frame, in the
+/// units [`noise_reaches`] measures.
+///
+/// Measured lower quartiles: a noise-free frame reads **0** at every module
+/// pitch from 3 px up, and at every symbol size and illumination model on the
+/// degradation grid; sigma 4 reads 4, sigma 8 reads 8, sigma 12 reads 11, sigma
+/// 16 reads 15. 3 sits in the gap, and the gap is what the gate is: the
+/// smoothing starts to pay from about sigma 4, and every clean frame must stay
+/// on the unsmoothed path.
+const DENOISE_TRIGGER: u32 = 3;
+
+/// Whether the frame's noise floor reaches `threshold` — the lower quartile (see
+/// [`NOISE_QUANTILE`]) of `|2*p[x] - p[x-1] - p[x+1]|` over every
+/// [`NOISE_ROW_STRIDE`]-th row.
+///
+/// The second difference annihilates anything locally linear — flat paper, and
+/// any illumination gradient or vignette, which is what makes this an estimate
+/// of *noise* rather than of image energy. What survives it is noise and real
+/// edges, and a low quantile is what separates those: an edge is a large
+/// contribution from a minority of pixels, and a quantile ignores minorities
+/// however large their values are. Noise, by contrast, is in every pixel,
+/// including the ones in the middle of a module where nothing else is happening
+/// — which is exactly what a *floor* measures.
+///
+/// For white noise of standard deviation `s` the second difference has variance
+/// `6 s^2`; the lower quartile of its absolute value is about `0.79 * s`.
+/// Measured on the degradation grid: sigma 4 gives 4, sigma 8 gives 8, sigma 12
+/// gives 11, sigma 16 gives 15.
+///
+/// # Why a comparison and not the quantile itself
+///
+/// The caller only ever asks whether the floor clears one constant, and the
+/// difference in how that is computed is not a micro-optimisation. Tallying the
+/// differences into a histogram to read a quantile off it is the exact shape
+/// this file already documents at [`HISTOGRAM_LANES`]: on a smooth frame nearly
+/// every sample lands in the same bin, and the whole loop serialises on
+/// store-to-load forwarding. Measured, that cost the miss path 110 us — a tenth
+/// of it — for a statistic that reads 57 000 pixels. Counting how many samples
+/// fall *below* the threshold answers the same question with one accumulator and
+/// no memory-dependent indexing, and the same benchmark moves by 2%.
+///
+/// `below * NOISE_QUANTILE < n` is "strictly fewer than a quarter of the samples
+/// are under the threshold", which is the lower quartile reaching it. Strict, so
+/// an exact quarter reads as quiet — ties resolve to leaving the frame alone.
+///
+/// Returns `false` for a buffer whose length does not match its dimensions, or
+/// one too narrow to hold a second difference.
+pub fn noise_reaches(luma: &[u8], width: u32, height: u32, threshold: u32) -> bool {
+    let (w, h) = (width as usize, height as usize);
+    if w < 3 || h == 0 || luma.len() != w * h {
+        return false;
+    }
+    let (mut below, mut n) = (0u32, 0u32);
+    for y in (0..h).step_by(NOISE_ROW_STRIDE) {
+        for win in luma[y * w..y * w + w].windows(3) {
+            let d = 2 * i32::from(win[1]) - i32::from(win[0]) - i32::from(win[2]);
+            below += u32::from(d.unsigned_abs() < threshold);
+            n += 1;
+        }
+    }
+    below * NOISE_QUANTILE < n
+}
+
+/// Smooths `luma` with a symmetric 3x3 box, returning a new buffer.
+///
+/// The retry rung runs this over the frame before binarizing it — when
+/// [`noise_reaches`] says the frame is noisy — and it is the only thing in the
+/// pipeline that addresses sensor noise rather than illumination or contrast.
+/// Noise is not a small perturbation of the dark test:
+/// the test compares one pixel against a window mean over thousands, so the mean
+/// is already noise-free and the whole of a pixel's noise lands on one side of
+/// the comparison. At sigma 12 that is enough to flip module centres in bulk —
+/// measured at the retry settings over the degradation grid, mean module errors
+/// at full contrast and sigma 12 run 20.5 unsmoothed against 0.3 smoothed, and
+/// the count of grid cells that binarize perfectly goes 0 of 36 to 35 of 36.
+///
+/// Averaging nine samples divides the noise by three while leaving the signal
+/// alone anywhere the window sits inside one module, which is why a box this
+/// small is enough and why it does not cost resolution: the sampler reads module
+/// *centres*, and a symmetric kernel does not move them. Measured down to
+/// 4 px/module, the smallest this workspace's fixtures render, the smoothed
+/// error is never the larger of the two.
+///
+/// It is separable, so the cost is two elementwise passes rather than nine
+/// multiplies per pixel, and it is on the retry rung alone — a frame that
+/// decoded on the primary pass never pays for it.
+///
+/// It is also gated, and has to be. Averaging over a 3 px window costs nothing
+/// while that window sits inside a module, and everything once it spans one: at
+/// 3 px/module — which is where the pinned deep-vignette fixture renders — an
+/// unconditional smoothing loses the symbol the retry exists to recover. The
+/// gate is what keeps every noise-free frame on exactly the path it had before,
+/// and every noise-free fixture measured has a median of 0.
+///
+/// The one-pixel border keeps its original value; the alternative is inventing
+/// samples off the edge of the frame, and no symbol is ever found in a border
+/// that thin.
+///
+/// Returns `None` on the same dimension mismatch [`binarize_with`] rejects.
+pub fn denoise(luma: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || luma.len() != w * h {
+        return None;
+    }
+    if w < 3 || h < 3 {
+        return Some(luma.to_vec());
+    }
+
+    // Horizontal, into `tmp`; then vertical, into `out`. Both are flat walks
+    // over slices with no per-pixel bounds check.
+    let mut tmp = luma.to_vec();
+    for y in 0..h {
+        let src = &luma[y * w..y * w + w];
+        let dst = &mut tmp[y * w..y * w + w];
+        for (d, win) in dst[1..w - 1].iter_mut().zip(src.windows(3)) {
+            *d = ((u32::from(win[0]) + u32::from(win[1]) + u32::from(win[2]) + 1) / 3) as u8;
+        }
+    }
+
+    let mut out = tmp.clone();
+    for y in 1..h - 1 {
+        let top = &tmp[(y - 1) * w + 1..(y - 1) * w + w - 1];
+        let mid = &tmp[y * w + 1..y * w + w - 1];
+        let bot = &tmp[(y + 1) * w + 1..(y + 1) * w + w - 1];
+        let dst = &mut out[y * w + 1..y * w + w - 1];
+        for (d, ((&a, &b), &c)) in dst.iter_mut().zip(top.iter().zip(mid).zip(bot)) {
+            *d = ((u32::from(a) + u32::from(b) + u32::from(c) + 1) / 3) as u8;
+        }
+    }
+    Some(out)
+}
+
+/// Binarizes a luma buffer at the primary Bradley margin.
+///
+/// The four-argument form, and what the pipeline's primary pass runs. See
+/// [`binarize_with`] for the parameters and the return contract.
+pub fn binarize(luma: &[u8], width: u32, height: u32, window_div: usize) -> Option<Binary> {
+    binarize_with(luma, width, height, window_div, PRIMARY_MARGIN)
+}
+
+/// Binarizes a luma buffer at every one of the retry rung's settings.
+///
+/// The retry differs from the primary in three things, and this is the one place
+/// all three are stated: a narrower window ([`RETRY_WINDOW_DIV`]), a narrower
+/// margin ([`NARROW_MARGIN`]), and — on a frame [`noise_reaches`] calls noisy — a
+/// [`denoise`] pre-pass. Each answers a different way a camera frame goes wrong,
+/// and they are on the same rung rather than on three because a frame that has
+/// already failed the primary pass is worth exactly one more attempt, not three.
+pub fn binarize_retry(luma: &[u8], width: u32, height: u32) -> Option<Binary> {
+    let settings = |buf: &[u8]| binarize_with(buf, width, height, RETRY_WINDOW_DIV, NARROW_MARGIN);
+    if noise_reaches(luma, width, height, DENOISE_TRIGGER) {
+        settings(&denoise(luma, width, height)?)
+    } else {
+        settings(luma)
+    }
+}
+
 /// Binarizes a luma buffer (`width * height` bytes, row-major).
 ///
 /// `window_div` selects the adaptive window radius as a fraction of the smaller
-/// image side — [`PRIMARY_WINDOW_DIV`] or [`RETRY_WINDOW_DIV`]. It is a
-/// parameter rather than a constant because no single radius holds both the
-/// print-contrast and the illumination envelope; the pipeline runs the primary
-/// and, only if it finds nothing at all, tries again at the retry radius.
+/// image side — [`PRIMARY_WINDOW_DIV`] or [`RETRY_WINDOW_DIV`] — and `margin`
+/// how far below its local mean a pixel must sit to be dark, over
+/// [`MARGIN_DEN`] — [`PRIMARY_MARGIN`] or [`NARROW_MARGIN`]. Both are
+/// parameters rather than constants because no single setting of either holds
+/// every envelope; the pipeline runs the primary settings and, only if it finds
+/// nothing at all, tries again at the retry settings.
+///
+/// `window_div` must be at least 3, so that the window fits inside any frame
+/// this reaches the adaptive pass with (`2 * radius + 1 <= min(w, h)`), and
+/// `margin` at most [`MARGIN_DEN`], which is what the all-dark argument in the
+/// body rests on. Both hold for every constant above; they are debug-asserted
+/// rather than checked because the module is private and the call sites are
+/// this file and the pipeline.
 ///
 /// Returns `None` if the dimensions do not match the buffer length or the image
 /// is empty.
-pub fn binarize(luma: &[u8], width: u32, height: u32, window_div: usize) -> Option<Binary> {
+pub fn binarize_with(
+    luma: &[u8],
+    width: u32,
+    height: u32,
+    window_div: usize,
+    margin: u32,
+) -> Option<Binary> {
+    debug_assert!(window_div >= 3, "window_div {window_div} is too small");
+    debug_assert!(
+        margin <= MARGIN_DEN,
+        "margin {margin} exceeds the denominator"
+    );
     let (w, h) = (width as usize, height as usize);
     if w == 0 || h == 0 || luma.len() != w * h {
         return None;
@@ -124,11 +385,11 @@ pub fn binarize(luma: &[u8], width: u32, height: u32, window_div: usize) -> Opti
     // than from a full window evaluation per pixel. Skipping straight to the
     // fallback here is what a blank camera frame used to pay an entire wasted
     // adaptive pass for.
-    if !can_be_dark(luma) {
+    if !can_be_dark(luma, margin) {
         return Some(otsu(luma, width, height, true));
     }
 
-    let bin = adaptive(luma, width, height, window_div);
+    let bin = adaptive(luma, width, height, window_div, margin);
 
     // Guard against a degenerate all-light result (e.g. a flat gradient with no
     // local dip anywhere) by falling back to Otsu. `any` rather than a count:
@@ -139,33 +400,47 @@ pub fn binarize(luma: &[u8], width: u32, height: u32, window_div: usize) -> Opti
     // The mirror case — *every* pixel dark — cannot occur and is not tested for.
     // Take the pixel holding the frame's maximum value `m`: every pixel in its
     // window is at most `m`, so `sum <= count * m`, and its own test reads
-    // `m * count * 100 < sum * 88 <= count * m * 88`, which is false. The
-    // brightest pixel in a frame is never dark.
+    // `m * count * MARGIN_DEN < sum * margin <= count * m * margin`. Since
+    // `margin <= MARGIN_DEN` that is false, at either margin. The brightest
+    // pixel in a frame is never dark.
     if !bin.dark.iter().any(|&d| d) {
         return Some(otsu(luma, width, height, false));
     }
     Some(bin)
 }
 
-/// Whether the adaptive pass could mark *any* pixel dark, decided from the
-/// frame's dynamic range alone.
+/// Whether the adaptive pass could mark *any* pixel dark at `margin`, decided
+/// from the frame's dynamic range alone.
 ///
-/// A pixel is dark when `value * count * 100 < sum * 88`. Every pixel in a
-/// window is at most the frame maximum, so `sum <= count * max`; every `value`
-/// is at least the frame minimum. When `min * 100 >= max * 88` the test is
-/// therefore false at every pixel, and the adaptive pass is a guaranteed no-op.
+/// A pixel is dark when `value * count * MARGIN_DEN < sum * margin`. Every pixel
+/// in a window is at most the frame maximum, so `sum <= count * max`; every
+/// `value` is at least the frame minimum. When `min * MARGIN_DEN >= max * margin`
+/// the test is therefore false at every pixel, and the adaptive pass is a
+/// guaranteed no-op.
 ///
 /// The bound reads only the extremes, so it does not mention the window radius:
 /// a frame that fails it fails it at *every* radius. That is what makes the
 /// result [radius-invariant](Binary::is_radius_invariant) and lets the pipeline
 /// skip its retry pass on such frames.
-fn can_be_dark(luma: &[u8]) -> bool {
+///
+/// It *does* mention the margin, and the pipeline's retry changes the margin as
+/// well as the radius, so skipping the retry on this ground is a judgement and
+/// not a proof. It is a sound one, and the bound itself is what shows why. A
+/// frame that fails at [`PRIMARY_MARGIN`] has under 12% of global dynamic range;
+/// illumination and reflectance both live inside that range, so the light across
+/// such a frame varies by at most 12% end to end and no surface in it reflects
+/// under 88% of any other. That is the definition of a globally flat scene, and
+/// on a globally flat scene one global threshold is not an approximation of the
+/// adaptive answer — it is the better answer, and it is exactly what the [`otsu`]
+/// arm below returns. Pinned by
+/// [`tests::a_thin_contrast_symbol_on_a_flat_frame_goes_through_otsu`].
+fn can_be_dark(luma: &[u8], margin: u32) -> bool {
     let (mut lo, mut hi) = (u8::MAX, u8::MIN);
     for &p in luma {
         lo = lo.min(p);
         hi = hi.max(p);
     }
-    u32::from(lo) * 100 < u32::from(hi) * 88
+    u32::from(lo) * MARGIN_DEN < u32::from(hi) * margin
 }
 
 /// The integer width the window sums are accumulated at.
@@ -213,8 +488,12 @@ impl Acc for u64 {
 /// Whether every product the `u32` accumulator has to hold fits in 32 bits.
 ///
 /// Three quantities are bounded: the running row prefix, which reaches the whole
-/// frame's luma sum (`w * h * 255`); the scaled window sum (`count * 255 * 22`);
-/// and the pixel side of the comparison (`255 * count * 25`). The last binds.
+/// frame's luma sum (`w * h * 255`); the scaled window sum
+/// (`count * 255 * margin`); and the pixel side of the comparison
+/// (`255 * count * MARGIN_DEN`). The last binds — and it binds independently of
+/// which margin is in force, since every margin is at most [`MARGIN_DEN`], which
+/// is why this takes no margin argument.
+///
 /// Written as divisions so the check itself cannot overflow.
 fn fits_u32(w: usize, h: usize, radius: usize) -> bool {
     let side = 2 * radius + 1;
@@ -224,18 +503,19 @@ fn fits_u32(w: usize, h: usize, radius: usize) -> bool {
 }
 
 /// Bradley adaptive threshold, with the window radius set to `1/window_div` of
-/// the smaller image side.
-fn adaptive(luma: &[u8], width: u32, height: u32, window_div: usize) -> Binary {
+/// the smaller image side and the dark test set `margin/MARGIN_DEN` below the
+/// local mean.
+fn adaptive(luma: &[u8], width: u32, height: u32, window_div: usize, margin: u32) -> Binary {
     let (w, h) = (width as usize, height as usize);
     // Window radius ~ 1/window_div of the smaller side, at least 4 px. Since
-    // `window_div >= 8` and the caller has ruled out sides below 24, the window
+    // `window_div >= 3` and the caller has ruled out sides below 24, the window
     // is never wider than the frame: `2 * radius + 1 <= min(w, h)`.
     let radius = (w.min(h) / window_div.max(1)).max(4);
 
     let dark = if fits_u32(w, h, radius) {
-        adaptive_at::<u32>(luma, w, h, radius)
+        adaptive_at::<u32>(luma, w, h, radius, margin)
     } else {
-        adaptive_at::<u64>(luma, w, h, radius)
+        adaptive_at::<u64>(luma, w, h, radius, margin)
     };
 
     Binary {
@@ -317,7 +597,7 @@ fn prefix_sum<A: Acc>(src: &[A], dst: &mut [A]) {
 /// every row — everywhere the window does not hit a frame edge — has a constant
 /// pixel `count`, so the comparison is a single loop over three slices that the
 /// backend can vectorize.
-fn adaptive_at<A: Acc>(luma: &[u8], w: usize, h: usize, radius: usize) -> Vec<bool> {
+fn adaptive_at<A: Acc>(luma: &[u8], w: usize, h: usize, radius: usize, margin: u32) -> Vec<bool> {
     // The edge/interior split below assumes the window never spans the whole
     // frame; callers guarantee it via the window_div >= 8 / min-side rules.
     debug_assert!(
@@ -328,11 +608,12 @@ fn adaptive_at<A: Acc>(luma: &[u8], w: usize, h: usize, radius: usize) -> Vec<bo
     let mut prefix = vec![A::ZERO; w + 1];
     let mut dark = vec![false; w * h];
 
-    // Bradley "t" parameter: a pixel is dark when it is >= 12% below the local
-    // mean, i.e. `value * count * 100 < sum * 88`. Both sides are divided by
-    // four, which is exact and buys four bits of headroom in the accumulator.
-    let t_num = A::from_count(22); // 88 / 4
-    let t_den = A::from_count(25); // 100 / 4
+    // Bradley "t" parameter: a pixel is dark when it is far enough below the
+    // local mean, i.e. `value * count * MARGIN_DEN < sum * margin`. Both
+    // margins are already expressed over 25 rather than 100, which is exact for
+    // each of them and buys four bits of headroom in the accumulator.
+    let t_num = A::from_count(margin as usize);
+    let t_den = A::from_count(MARGIN_DEN as usize);
 
     // Rows currently folded into `colsum`, as a half-open range.
     let (mut top, mut bottom) = (0usize, 0usize);
@@ -527,12 +808,17 @@ mod tests {
             }
         }
         for radius in [4usize, 15, 30] {
-            let narrow = adaptive_at::<u32>(&luma, w, h, radius);
-            let wide = adaptive_at::<u64>(&luma, w, h, radius);
-            assert_eq!(narrow, wide, "widths disagree at radius {radius}");
-            // Guard the guard: a fixture that binarized to one flat colour would
-            // let two broken implementations agree.
-            assert!(narrow.iter().any(|&d| d) && narrow.iter().any(|&d| !d));
+            for margin in [PRIMARY_MARGIN, NARROW_MARGIN] {
+                let narrow = adaptive_at::<u32>(&luma, w, h, radius, margin);
+                let wide = adaptive_at::<u64>(&luma, w, h, radius, margin);
+                assert_eq!(
+                    narrow, wide,
+                    "widths disagree at radius {radius}, margin {margin}"
+                );
+                // Guard the guard: a fixture that binarized to one flat colour
+                // would let two broken implementations agree.
+                assert!(narrow.iter().any(|&d| d) && narrow.iter().any(|&d| !d));
+            }
         }
     }
 
@@ -754,6 +1040,238 @@ mod tests {
         // `detect::a_deep_vignette_is_recovered_by_the_retry_pass` and — for the
         // degraded-sample case the trigger has to catch — by
         // `micro_detect::a_degraded_micro_sample_does_not_suppress_the_retry`.
+    }
+
+    /// Deterministic zero-mean normal noise, Box-Muller over a xorshift.
+    fn noisy(luma: &mut [u8], sigma: f64, seed: u64) {
+        let mut s = seed | 1;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            ((s >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        for p in luma.iter_mut() {
+            let (u1, u2) = (next(), next());
+            let n = (-2.0 * u1.ln()).sqrt() * (core::f64::consts::TAU * u2).cos();
+            *p = (f64::from(*p) + sigma * n).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    /// Whether module `(mx, my)` of the synthetic texture is dark.
+    ///
+    /// `alternating` gives a strict one-module checkerboard, which is the worst
+    /// case for any estimator that keys on high-frequency energy: it minimises
+    /// the fraction of pixels in the interior of a run.
+    fn texture_module(mx: u32, my: u32, alternating: bool) -> bool {
+        if alternating {
+            return (mx ^ my) & 1 == 0;
+        }
+        let mut v = mx.wrapping_mul(73_856_093) ^ my.wrapping_mul(19_349_663);
+        v ^= v >> 13;
+        v = v.wrapping_mul(0x5bd1_e995);
+        v ^= v >> 15;
+        v & 1 == 0
+    }
+
+    /// A frame tiled edge to edge with `scale`-px modules: dark modules at
+    /// `bg - delta` luma against a `bg` background, the whole thing scaled by a
+    /// radial illumination falloff of depth `vignette`.
+    ///
+    /// This is the degradation model the low-light work was measured on, minus
+    /// the noise (see [`noisy`]) — contrast and illumination varied
+    /// independently, because the two failures they cause are independent.
+    fn textured_frame(
+        w: u32,
+        h: u32,
+        scale: u32,
+        bg: f64,
+        delta: f64,
+        vignette: f64,
+        alternating: bool,
+    ) -> Vec<u8> {
+        let (cx, cy) = (f64::from(w - 1) / 2.0, f64::from(h - 1) / 2.0);
+        let r_max = cx * cx + cy * cy;
+        let mut luma = vec![0u8; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (f64::from(x) - cx, f64::from(y) - cy);
+                let fall = 1.0 - vignette * (dx * dx + dy * dy) / r_max;
+                let dark = texture_module(x / scale, y / scale, alternating);
+                let base = if dark { bg - delta } else { bg };
+                luma[(y * w + x) as usize] = (fall * base).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        luma
+    }
+
+    /// Module-centre binarization errors against the pattern the frame was
+    /// painted from, over the interior modules of a [`textured_frame`].
+    fn texture_errors(bin: &Binary, w: u32, h: u32, scale: u32) -> (u32, u32) {
+        let (mut bad, mut total) = (0u32, 0u32);
+        for my in 1..h / scale - 1 {
+            for mx in 1..w / scale - 1 {
+                let (px, py) = (
+                    (mx * scale + scale / 2) as i64,
+                    (my * scale + scale / 2) as i64,
+                );
+                total += 1;
+                bad += u32::from(bin.get(px, py) != texture_module(mx, my, false));
+            }
+        }
+        (bad, total)
+    }
+
+    #[test]
+    fn the_noise_estimate_separates_sensor_noise_from_texture() {
+        // The whole denoise gate rests on this discrimination, and the hard half
+        // is the *negative*: a dense symbol is nothing but high-frequency
+        // structure, so an estimator that mistakes structure for noise smooths a
+        // frame that must not be smoothed. Swept down to 3 px/module — where the
+        // pinned deep-vignette fixture renders, and where smoothing costs the
+        // symbol — across the contrast range, and including the strict
+        // alternating checkerboard, which minimises the fraction of quiet pixels
+        // the quantile relies on.
+        let (w, h) = (320u32, 240u32);
+        for scale in [3u32, 4, 6, 8] {
+            for alternating in [false, true] {
+                for delta in [156.0f64, 60.0, 25.0] {
+                    let clean = textured_frame(w, h, scale, 240.0, delta, 0.6, alternating);
+                    assert!(
+                        !noise_reaches(&clean, w, h, DENOISE_TRIGGER),
+                        "noise-free frame read as noisy: {scale}px modules, \
+                         delta {delta}, alternating {alternating}"
+                    );
+                }
+            }
+        }
+
+        // And the positive: the floor tracks sigma at about 0.79 * sigma, so it
+        // must clear a threshold well below that and fail one well above.
+        // Bracketing rather than asserting a point value is what makes this a
+        // calibration test and not a golden value.
+        for (sigma, lo, hi) in [(4.0, 3u32, 7u32), (8.0, 6, 12), (16.0, 12, 20)] {
+            let mut frame = textured_frame(w, h, 6, 240.0, 156.0, 0.6, false);
+            noisy(&mut frame, sigma, 0x51ee_d000 + sigma as u64);
+            assert!(
+                noise_reaches(&frame, w, h, lo) && !noise_reaches(&frame, w, h, hi),
+                "sigma {sigma}: noise floor outside [{lo}, {hi})"
+            );
+            assert!(
+                noise_reaches(&frame, w, h, DENOISE_TRIGGER),
+                "sigma {sigma} must trip the gate"
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_recovers_module_centres_that_noise_flips() {
+        // The measurement the retry rung's denoise exists for, at the settings
+        // it runs at. Noise is not a small perturbation of the dark test: the
+        // window mean is taken over thousands of pixels and is already
+        // noise-free, so the whole of a pixel's noise lands on one side of the
+        // comparison. Averaging nine samples divides it by three.
+        //
+        // Asserted as a ratio rather than an absolute count, so the test states
+        // the claim — much better — rather than pinning a number that any
+        // harmless change to the fixture would move. The first assertion guards
+        // the fixture: if noise stops damaging it, the second proves nothing.
+        let (w, h, scale) = (320u32, 240u32, 6u32);
+        let mut frame = textured_frame(w, h, scale, 220.0, 60.0, 0.0, false);
+        noisy(&mut frame, 16.0, 0xd00d);
+        assert!(
+            noise_reaches(&frame, w, h, DENOISE_TRIGGER),
+            "fixture must trip the gate"
+        );
+
+        let raw = binarize_with(&frame, w, h, RETRY_WINDOW_DIV, NARROW_MARGIN).expect("raw");
+        let smoothed = binarize_retry(&frame, w, h).expect("retry rung");
+        let (bad_raw, total) = texture_errors(&raw, w, h, scale);
+        let (bad_smooth, _) = texture_errors(&smoothed, w, h, scale);
+
+        assert!(
+            bad_raw * 20 > total,
+            "fixture no longer damaged by noise ({bad_raw} of {total}); the test proves nothing"
+        );
+        assert!(
+            bad_smooth * 4 < bad_raw,
+            "smoothing must cut module errors by more than 4x: {bad_raw} -> {bad_smooth}"
+        );
+    }
+
+    #[test]
+    fn the_narrow_margin_sees_a_print_the_primary_margin_cannot() {
+        // The mechanism behind the whole low-light rework, as an arithmetic
+        // statement about one frame rather than as a story. The Bradley test is
+        // relative, so a symbol whose modules sit a fixed number of luma below
+        // the paper has to clear a threshold that scales with the paper. Against
+        // a 240 background that threshold is about 51 luma, so at every contrast
+        // swept here the primary margin does not merely degrade — it returns a
+        // blank, and error correction downstream has nothing to work on.
+        //
+        // The vignette is what makes the case sharp rather than academic. On a
+        // *flat* frame this same contrast trips `can_be_dark`, the adaptive pass
+        // returns nothing at all, and the Otsu fallback rescues it — which is
+        // the subject of `a_thin_contrast_symbol_on_a_flat_frame_goes_through_otsu`.
+        // Add any illumination gradient and both of those escapes close: the
+        // frame's dynamic range is wide enough to run the adaptive pass, the
+        // adaptive pass marks just enough stray pixels to stay off the fallback,
+        // and a global threshold could not have resolved the frame anyway. That
+        // combination — thin print under uneven light — is the one real cameras
+        // hand us, and the margin is the only thing that answers it.
+        let (w, h, scale) = (320u32, 240u32, 6u32);
+        // 35 is the thin end of what the narrow margin holds under this
+        // gradient, not of what it holds at all: on a flat frame it resolves 25
+        // outright. Below that, under uneven light, the contrast is past what
+        // any threshold recovers and the envelope table says so.
+        for delta in [45.0f64, 40.0, 35.0] {
+            let luma = textured_frame(w, h, scale, 240.0, delta, 0.5, false);
+            let wide = binarize(&luma, w, h, RETRY_WINDOW_DIV).expect("wide margin");
+            let narrow =
+                binarize_with(&luma, w, h, RETRY_WINDOW_DIV, NARROW_MARGIN).expect("narrow");
+            let (bad_wide, total) = texture_errors(&wide, w, h, scale);
+            let (bad_narrow, _) = texture_errors(&narrow, w, h, scale);
+
+            // The wide margin loses essentially every dark module — about half
+            // the frame — while the narrow one lands inside any error-correction
+            // budget. Stated as proportions of the frame rather than as counts,
+            // because the claim is about which side of "recoverable" each margin
+            // falls on, not about a golden number.
+            assert!(
+                bad_wide * 3 > total,
+                "delta {delta}: the primary margin should lose most of the symbol, \
+                 lost {bad_wide} of {total}"
+            );
+            assert!(
+                bad_narrow * 50 < total,
+                "delta {delta}: the narrow margin should land under 2% module error, \
+                 got {bad_narrow} of {total}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thin_contrast_symbol_on_a_flat_frame_goes_through_otsu() {
+        // Pins the one place the retry's margin change is knowingly not
+        // consulted. A frame under 12% of global dynamic range fails
+        // `can_be_dark` at the primary margin, returns the Otsu fallback, and is
+        // marked settled — so the retry, whose margin *would* have found
+        // something, never runs. That is sound because such a frame is globally
+        // flat by construction, and a global threshold is the right answer on
+        // it: this asserts the fallback actually resolves the modules, which is
+        // what makes skipping the retry free rather than lossy.
+        let (w, h, scale) = (320u32, 240u32, 6u32);
+        let luma = textured_frame(w, h, scale, 220.0, 20.0, 0.0, false);
+        let bin = binarize(&luma, w, h, PRIMARY_WINDOW_DIV).expect("binarizes");
+        assert!(
+            bin.is_radius_invariant(),
+            "a frame this flat must short-circuit to the global threshold"
+        );
+        assert_eq!(
+            texture_errors(&bin, w, h, scale).0,
+            0,
+            "the Otsu fallback must resolve every module centre"
+        );
     }
 
     #[test]

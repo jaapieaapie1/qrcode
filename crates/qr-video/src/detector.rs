@@ -399,6 +399,14 @@ fn detect_full(frame: &Frame<'_>) -> Vec<Detection> {
 /// window, which is the case the *primary* radius is the right one for. When the
 /// ROI stops producing, the cadence falls back to [`detect_full`], and that is
 /// where the second opinion is taken.
+///
+/// The same reasoning covers the low-light ladder (narrowed retry margin +
+/// gated denoise): it deliberately does NOT run inside an ROI crop. The retry
+/// window is a fraction of the crop's smaller side, so inside a tight crop it
+/// collapses toward the minimum radius and hollows finder cores; and every ROI
+/// miss already falls back to a same-frame full scan (three misses abandon the
+/// ROI entirely), so sustained bad lighting reaches the full ladder within a
+/// few frames rather than losing any frame outright.
 fn detect_in_roi(frame: &Frame<'_>, roi: Roi) -> Vec<Detection> {
     let (sub, w, h) = crop(frame, roi);
     if w == 0 || h == 0 {

@@ -13,17 +13,33 @@
 //!
 //! # The retry pass
 //!
-//! No single adaptive window radius holds every image. A wide window keeps solid
-//! features solid — a finder pattern's 3-module core hollows out under a narrow
-//! one, at any print contrast — while a narrow window is what tracks a steep
-//! illumination gradient, such as a small symbol in the corner of a vignetted
-//! camera frame. The two requirements genuinely conflict.
+//! Binarization has two settings that no single value holds every image at, and
+//! they conflict in the same shape:
+//!
+//! * **Window radius.** A wide window keeps solid features solid — a finder
+//!   pattern's 3-module core hollows out under a narrow one, at any print
+//!   contrast — while a narrow window is what tracks a steep illumination
+//!   gradient, such as a small symbol in the corner of a vignetted camera frame.
+//! * **Bradley margin.** A wide margin is what keeps sensor noise from speckling
+//!   a well-lit frame, while a narrow one is what sees a symbol whose print
+//!   contrast is thin — a dimly lit or worn print, where the dark modules sit
+//!   only a few luma below the paper. Because the test is relative, the wide
+//!   margin does not merely degrade on such a frame: it binarizes the symbol
+//!   away entirely, and nothing downstream recovers modules that were never
+//!   distinguished.
+//! * **Smoothing.** Averaging a 3x3 box over the frame divides sensor noise by
+//!   three, and costs nothing while that box sits inside a module — but a symbol
+//!   rendered at 3 px/module has no such margin, and smoothing loses it. So this
+//!   one is gated on a noise estimate rather than merely deferred, which is what
+//!   keeps every clean frame on the path it had before.
 //!
 //! So the pipeline runs twice, in order. The primary pass binarizes at
-//! `binarize::PRIMARY_WINDOW_DIV` and is what nearly every image is decoded by.
-//! Only if it yields nothing usable does the whole frame get binarized again at
-//! `binarize::RETRY_WINDOW_DIV` and rescanned. Success on the first pass costs
-//! nothing.
+//! `binarize::PRIMARY_WINDOW_DIV` and `binarize::PRIMARY_MARGIN`, and is what
+//! nearly every image is decoded by. Only if it yields nothing usable does the
+//! whole frame go through `binarize::binarize_retry` — all three settings moved
+//! at once — and get rescanned. Success on the first pass costs nothing, and a
+//! miss still costs exactly two passes: the rungs stack settings rather than
+//! multiplying passes.
 //!
 //! ## What counts as "usable", and why it is not "found something"
 //!
@@ -62,6 +78,12 @@
 //! real time — when its dynamic range is too narrow for any pixel to fall below
 //! its local mean, which is every blank or near-blank camera frame. Those return
 //! after one pass. See `binarize::Binary::is_radius_invariant`.
+//!
+//! On the dynamic-range arm the second rung's *margin* would not have been a
+//! no-op, so that skip is a judgement rather than a proof. It is the right one:
+//! a frame that narrow is globally flat by construction, and the global Otsu
+//! threshold such a frame falls back to is the better answer on it than any
+//! adaptive window. `binarize::can_be_dark` carries the argument.
 //!
 //! ## What the retry does not cover
 //!
@@ -109,7 +131,7 @@ mod sampler;
 
 pub use geometry::{PerspectiveTransform, Point};
 
-use binarize::{Binary, PRIMARY_WINDOW_DIV, RETRY_WINDOW_DIV};
+use binarize::Binary;
 use finder::Finder;
 use grouping::QrCandidate;
 use image::GrayImage;
@@ -143,11 +165,11 @@ pub fn detect(img: &GrayImage) -> Vec<Detection> {
 /// Runs the retry pass when the primary yields nothing usable — see the crate
 /// docs for what "usable" means and how the two passes are compared.
 pub fn detect_luma(luma: &[u8], width: u32, height: u32) -> Vec<Detection> {
-    let (primary, settled) = detect_qr_at(luma, width, height, PRIMARY_WINDOW_DIV);
+    let (primary, settled) = detect_qr_at(luma, width, height, Pass::Primary);
     if settled || usable_qr(&primary) > 0 {
         return primary;
     }
-    let (retry, _) = detect_qr_at(luma, width, height, RETRY_WINDOW_DIV);
+    let (retry, _) = detect_qr_at(luma, width, height, Pass::Retry);
     better_pass(primary, retry, usable_qr)
 }
 
@@ -199,12 +221,33 @@ fn better_pass<T>(primary: Vec<T>, retry: Vec<T>, usable: impl Fn(&[T]) -> usize
 /// [`detect_luma`] recovers and this function does not is, by construction, one
 /// the retry pass found.
 pub fn detect_luma_single_pass(luma: &[u8], width: u32, height: u32) -> Vec<Detection> {
-    detect_qr_at(luma, width, height, PRIMARY_WINDOW_DIV).0
+    detect_qr_at(luma, width, height, Pass::Primary).0
+}
+
+/// One rung of the binarization ladder.
+///
+/// The two rungs differ in *both* of binarize's settings — window radius and
+/// Bradley margin — so naming them here, rather than threading two loose
+/// numbers through the pipeline, is what keeps "which pass is this" a single
+/// decision with a single answer. [`binarize_for`] is the only place the
+/// settings themselves appear.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pass {
+    Primary,
+    Retry,
+}
+
+/// Binarizes `luma` at `pass`'s settings.
+fn binarize_for(luma: &[u8], width: u32, height: u32, pass: Pass) -> Option<Binary> {
+    match pass {
+        Pass::Primary => binarize::binarize(luma, width, height, binarize::PRIMARY_WINDOW_DIV),
+        Pass::Retry => binarize::binarize_retry(luma, width, height),
+    }
 }
 
 /// A pass's detections, plus whether the frame *settled* it — see
 /// [`settled_by_binarization`].
-type Pass<T> = (Vec<T>, bool);
+type Outcome<T> = (Vec<T>, bool);
 
 /// Whether a second pass at another radius is provably pointless.
 ///
@@ -219,8 +262,8 @@ fn settled_by_binarization(bin: Option<&Binary>) -> bool {
     bin.is_none_or(Binary::is_radius_invariant)
 }
 
-fn detect_qr_at(luma: &[u8], width: u32, height: u32, window_div: usize) -> Pass<Detection> {
-    let scanned = scan(luma, width, height, window_div);
+fn detect_qr_at(luma: &[u8], width: u32, height: u32, pass: Pass) -> Outcome<Detection> {
+    let scanned = scan(luma, width, height, pass);
     let settled = settled_by_binarization(scanned.as_ref().map(|(bin, ..)| bin));
     let dets = scanned
         .map(|(bin, _, candidates, _)| collect_qr(&bin, &candidates))
@@ -235,8 +278,8 @@ type Scan = (Binary, Vec<Finder>, Vec<QrCandidate>, Vec<bool>);
 
 /// Shared front of the pipeline: binarize at the given window radius, locate
 /// finder patterns, group them into QR candidates (see [`grouping::group`]).
-fn scan(luma: &[u8], width: u32, height: u32, window_div: usize) -> Option<Scan> {
-    let bin = binarize::binarize(luma, width, height, window_div)?;
+fn scan(luma: &[u8], width: u32, height: u32, pass: Pass) -> Option<Scan> {
+    let bin = binarize_for(luma, width, height, pass)?;
     let finders = finder::find_finders(&bin);
     let (candidates, used) = grouping::group(&finders);
     Some((bin, finders, candidates, used))
@@ -334,11 +377,11 @@ pub fn detect_micro(img: &GrayImage) -> Vec<MicroDetection> {
 /// the distinction does not arise there.
 #[cfg(feature = "micro")]
 pub fn detect_micro_luma(luma: &[u8], width: u32, height: u32) -> Vec<MicroDetection> {
-    let (primary, settled) = detect_micro_at(luma, width, height, PRIMARY_WINDOW_DIV);
+    let (primary, settled) = detect_micro_at(luma, width, height, Pass::Primary);
     if settled || usable_micro(&primary) > 0 {
         return primary;
     }
-    let (retry, _) = detect_micro_at(luma, width, height, RETRY_WINDOW_DIV);
+    let (retry, _) = detect_micro_at(luma, width, height, Pass::Retry);
     better_pass(primary, retry, usable_micro)
 }
 
@@ -359,17 +402,12 @@ fn usable_micro(dets: &[MicroDetection]) -> usize {
 /// apart.
 #[cfg(feature = "micro")]
 pub fn detect_micro_luma_single_pass(luma: &[u8], width: u32, height: u32) -> Vec<MicroDetection> {
-    detect_micro_at(luma, width, height, PRIMARY_WINDOW_DIV).0
+    detect_micro_at(luma, width, height, Pass::Primary).0
 }
 
 #[cfg(feature = "micro")]
-fn detect_micro_at(
-    luma: &[u8],
-    width: u32,
-    height: u32,
-    window_div: usize,
-) -> Pass<MicroDetection> {
-    let scanned = scan(luma, width, height, window_div);
+fn detect_micro_at(luma: &[u8], width: u32, height: u32, pass: Pass) -> Outcome<MicroDetection> {
+    let scanned = scan(luma, width, height, pass);
     let settled = settled_by_binarization(scanned.as_ref().map(|(bin, ..)| bin));
     let dets = scanned
         .map(|(bin, finders, _, used)| collect_micro(&bin, &finders, &used))
@@ -402,11 +440,11 @@ pub fn detect_all_luma(
     width: u32,
     height: u32,
 ) -> (Vec<Detection>, Vec<MicroDetection>) {
-    let ((qr, micro), settled) = detect_all_at(luma, width, height, PRIMARY_WINDOW_DIV);
+    let ((qr, micro), settled) = detect_all_at(luma, width, height, Pass::Primary);
     if settled || usable_qr(&qr) + usable_micro(&micro) > 0 {
         return (qr, micro);
     }
-    let ((retry_qr, retry_micro), _) = detect_all_at(luma, width, height, RETRY_WINDOW_DIV);
+    let ((retry_qr, retry_micro), _) = detect_all_at(luma, width, height, Pass::Retry);
 
     // Same ranking as the single-symbology paths, over the combined totals.
     let primary_score = (
@@ -429,9 +467,9 @@ fn detect_all_at(
     luma: &[u8],
     width: u32,
     height: u32,
-    window_div: usize,
+    pass: Pass,
 ) -> ((Vec<Detection>, Vec<MicroDetection>), bool) {
-    let scanned = scan(luma, width, height, window_div);
+    let scanned = scan(luma, width, height, pass);
     let settled = settled_by_binarization(scanned.as_ref().map(|(bin, ..)| bin));
     let dets = scanned
         .map(|(bin, finders, candidates, used)| {
