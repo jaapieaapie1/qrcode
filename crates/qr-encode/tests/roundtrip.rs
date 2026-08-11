@@ -43,6 +43,8 @@ fn multiblock_symbol_roundtrips() {
         version: Some(v5),
         mask: None,
         mode: Some(Mode::Byte),
+        eci: None,
+        assume_shift_jis: false,
     };
     let m = encode(&payload, opts).expect("encode");
     let decoded = qr_decode::decode(&m).expect("decode");
@@ -66,6 +68,8 @@ fn all_forced_masks_roundtrip() {
             version: None,
             mask: Some(forced),
             mode: None,
+            eci: None,
+            assume_shift_jis: false,
         };
         let m = encode(payload, opts).expect("encode");
         let decoded = qr_decode::decode(&m).unwrap_or_else(|e| panic!("mask {forced}: {e:?}"));
@@ -100,6 +104,8 @@ fn version_info_symbol_roundtrips() {
             version: Some(v),
             mask: None,
             mode: Some(Mode::Byte),
+            eci: None,
+            assume_shift_jis: false,
         };
         let m = encode(&payload, opts).unwrap_or_else(|e| panic!("v{n}: {e:?}"));
         let decoded = qr_decode::decode(&m).unwrap_or_else(|e| panic!("v{n} decode: {e:?}"));
@@ -161,6 +167,8 @@ fn exact_capacity_fits_and_roundtrips() {
                 version: None,
                 mask: None,
                 mode: Some(Mode::Byte),
+                eci: None,
+                assume_shift_jis: false,
             };
             let m = encode(&payload, opts).unwrap_or_else(|e| panic!("v{n} {ec:?} exact: {e:?}"));
             let d = qr_decode::decode(&m).unwrap_or_else(|e| panic!("v{n} {ec:?} decode: {e:?}"));
@@ -188,6 +196,8 @@ fn one_over_capacity_is_clean_error() {
             version: Some(v),
             mask: None,
             mode: Some(Mode::Byte),
+            eci: None,
+            assume_shift_jis: false,
         };
         assert!(
             encode(&payload, opts).is_err(),
@@ -203,6 +213,8 @@ fn forced_mode_incompatible_errors_not_panics() {
         version: None,
         mask: None,
         mode: Some(m),
+        eci: None,
+        assume_shift_jis: false,
     };
     assert!(encode(b"abc", opts(Mode::Numeric)).is_err());
     assert!(encode(b"abc", opts(Mode::Alphanumeric)).is_err());
@@ -217,6 +229,8 @@ fn invalid_mask_errors() {
         version: None,
         mask: Some(8),
         mode: None,
+        eci: None,
+        assume_shift_jis: false,
     };
     assert!(encode(b"123", opts).is_err());
 }

@@ -1,22 +1,48 @@
 //! `qr-encode` — turn a byte payload into a finished QR-symbol [`BitMatrix`].
 //!
-//! The encoder performs the full ISO/IEC 18004 data path: mode selection,
-//! bit-stream assembly (mode indicator, character count, payload, terminator
-//! and pad codewords), smallest-fitting version selection, Reed-Solomon block
-//! splitting and interleaving (via [`qr_core`]), zigzag module placement,
-//! evaluation of all eight data masks against the ISO penalty rules and
-//! placement of the format (and, for versions >= 7, version) information.
+//! The encoder performs the full ISO/IEC 18004 data path: optimal mixed-mode
+//! segmentation, bit-stream assembly (mode indicators, character counts,
+//! payloads, terminator and pad codewords), smallest-fitting version selection,
+//! Reed-Solomon block splitting and interleaving (via [`qr_core`]), zigzag
+//! module placement, evaluation of all eight data masks against the ISO penalty
+//! rules and placement of the format (and, for versions >= 7, version)
+//! information.
 //!
 //! # Coordinates
 //!
 //! Output matrices use `(x, y)` = (column, row) with the origin at the
 //! top-left, matching [`qr_core::BitMatrix`].
 //!
-//! # Scope (v1)
+//! # Segmentation
 //!
-//! Single-mode segmentation only (numeric / alphanumeric / byte auto-selected
-//! for the whole payload). Mixed-mode segmentation, Kanji and ECI are not
-//! implemented — see the crate Known Gaps.
+//! [`encode`] splits the payload into the minimal-bit sequence of numeric,
+//! alphanumeric and byte segments by dynamic programming (see the `segment`
+//! module); it is never longer than encoding the whole payload in a single
+//! mode. Setting [`Options::mode`] overrides this with one forced segment.
+//!
+//! # Kanji and Shift-JIS
+//!
+//! Kanji mode (ISO §7.4.6) transports *Shift-JIS character values*, not bytes: a
+//! conformant reader converts the 13-bit values back to Shift-JIS characters.
+//! Since this crate performs no character-set conversion and a `&[u8]` carries
+//! no encoding, Kanji is **opt-in**:
+//!
+//! - [`Options::assume_shift_jis`] (default `false`) — the caller asserts the
+//!   payload is Shift-JIS, and the segmenter may use Kanji segments where they
+//!   are cheaper.
+//! - [`Options::mode`] = [`Mode::Kanji`] — one forced Kanji segment.
+//!
+//! By default UTF-8 (and any other non-Shift-JIS) input goes to byte mode
+//! unchanged, even where its bytes happen to fall inside the Shift-JIS ranges —
+//! which ordinary UTF-8 CJK text does constantly. Setting the flag on a payload
+//! that is *not* Shift-JIS produces mojibake on every reader other than this
+//! workspace's own byte-transparent decoder.
+//!
+//! # Extended Channel Interpretation
+//!
+//! [`Options::eci`] emits an ECI header (ISO §7.4.3.2) ahead of the data
+//! segments — for example ECI 26 to declare a UTF-8 byte payload. Micro QR has
+//! no ECI mode and `MicroOptions` accordingly has no such field.
 //!
 //! # Features
 //!
@@ -44,9 +70,11 @@ pub mod micro;
 #[cfg(feature = "micro")]
 pub use micro::{MicroEncodeError, MicroOptions, encode_micro};
 
+use alloc::vec;
 use alloc::vec::Vec;
 use bits::BitBuffer;
 use qr_core::{BitMatrix, EcLevel, Mode, Version, ec_blocks};
+use segment::Segment;
 
 /// Errors returned by [`encode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,13 +82,16 @@ pub enum EncodeError {
     /// The payload does not fit in the requested (or any) version at the given
     /// EC level.
     DataTooLarge,
-    /// A caller-supplied [`Mode`] cannot represent the payload, or is an
-    /// unsupported mode (Kanji/ECI).
+    /// A caller-supplied [`Mode`] cannot represent the payload, or is a mode
+    /// that carries no data ([`Mode::Eci`] — use [`Options::eci`] instead).
     ModeMismatch,
     /// A caller-supplied version is out of the `1..=40` range.
     InvalidVersion,
     /// A caller-supplied mask id is outside `0..=7`.
     InvalidMask,
+    /// A caller-supplied ECI assignment number is outside the six-digit range
+    /// `0..=999_999` (ISO/IEC 18004 Table 4).
+    InvalidEci,
 }
 
 impl core::fmt::Display for EncodeError {
@@ -70,6 +101,7 @@ impl core::fmt::Display for EncodeError {
             EncodeError::ModeMismatch => "mode cannot represent the payload",
             EncodeError::InvalidVersion => "version out of range (1..=40)",
             EncodeError::InvalidMask => "mask id out of range (0..=7)",
+            EncodeError::InvalidEci => "ECI assignment number out of range (0..=999999)",
         };
         f.write_str(msg)
     }
@@ -89,19 +121,41 @@ pub struct Options {
     /// Force a specific data mask (`0..=7`); otherwise the lowest-penalty mask
     /// is chosen.
     pub mask: Option<u8>,
-    /// Force a specific encoding mode; otherwise the most compact supported mode
-    /// is selected from the payload.
+    /// Force the whole payload into one segment of this mode; otherwise the
+    /// minimal-bit mixed-mode segmentation is computed from the payload.
+    ///
+    /// [`Mode::Eci`] is rejected — set [`Options::eci`] instead.
     pub mode: Option<Mode>,
+    /// Emit an ECI header with this six-digit assignment number ahead of the
+    /// data segments (ISO/IEC 18004 §7.4.3.2); `None` leaves the default
+    /// interpretation in force. ECI 26 declares a UTF-8 byte payload.
+    pub eci: Option<u32>,
+    /// Assert that the payload is **Shift-JIS**, allowing the segmenter to use
+    /// 13-bit Kanji segments (ISO §7.4.6) where they are cheaper than byte mode.
+    ///
+    /// Defaults to `false`, which keeps every byte pair in byte mode. Set it
+    /// only when the bytes really are Shift-JIS: Kanji mode carries Shift-JIS
+    /// *character values*, so a conformant reader will render non-Shift-JIS
+    /// bytes placed in a Kanji segment as mojibake. Byte values alone cannot
+    /// distinguish the two — UTF-8 CJK text lands inside the Shift-JIS ranges
+    /// routinely — which is why this is a caller assertion and not inferred.
+    ///
+    /// Ignored when [`Options::mode`] forces a mode; forcing
+    /// [`Mode::Kanji`] is the other way to ask for Kanji segments.
+    pub assume_shift_jis: bool,
 }
 
 impl Options {
-    /// Options that auto-select version, mask and mode for the given EC level.
+    /// Options that auto-select version, mask and segmentation for the given EC
+    /// level, with no ECI header and Kanji mode off.
     pub fn new(ec: EcLevel) -> Self {
         Options {
             ec,
             version: None,
             mask: None,
             mode: None,
+            eci: None,
+            assume_shift_jis: false,
         }
     }
 }
@@ -111,57 +165,91 @@ fn data_capacity_bits(version: Version, ec: EcLevel) -> usize {
     ec_blocks(version, ec).total_data_codewords() as usize * 8
 }
 
-/// Chooses the encoding mode, validating any caller-forced choice.
-fn resolve_mode(data: &[u8], forced: Option<Mode>) -> Result<Mode, EncodeError> {
-    match forced {
+/// Inclusive version bounds of the three ISO Table 3 character-count groups.
+/// Segmentation depends on the version only through this grouping, so the
+/// dynamic program runs once per group rather than once per version.
+const VERSION_GROUPS: [(u8, u8); 3] = [(1, 9), (10, 26), (27, 40)];
+
+/// Splits `data` into segments for `version`: one forced segment when the
+/// caller pinned a mode, otherwise the minimal-bit segmentation.
+///
+/// Kanji segments are only ever produced from an explicit caller assertion —
+/// `Options::mode = Some(Mode::Kanji)` here, or `Options::assume_shift_jis`
+/// reaching the dynamic program.
+fn segments_for(
+    data: &[u8],
+    version: Version,
+    options: &Options,
+) -> Result<Vec<Segment>, EncodeError> {
+    match options.mode {
         Some(m) => {
             if segment::mode_supports(m, data) {
-                Ok(m)
+                Ok(vec![Segment::new(m, 0, data.len())])
             } else {
                 Err(EncodeError::ModeMismatch)
             }
         }
-        None => Ok(segment::select_mode(data)),
+        None => Ok(segment::optimal_segments(
+            data,
+            version,
+            options.assume_shift_jis,
+        )),
     }
 }
 
-/// Chooses the smallest version that fits, or validates a caller-forced one.
-fn resolve_version(
-    data: &[u8],
-    mode: Mode,
-    ec: EcLevel,
-    forced: Option<Version>,
-) -> Result<Version, EncodeError> {
-    match forced {
-        Some(v) => {
-            let bits = segment::total_bits(mode, data, v).ok_or(EncodeError::ModeMismatch)?;
-            if bits <= data_capacity_bits(v, ec) {
-                Ok(v)
-            } else {
-                Err(EncodeError::DataTooLarge)
-            }
-        }
-        None => {
-            for n in 1..=40u8 {
-                let v = Version::new(n).map_err(|_| EncodeError::InvalidVersion)?;
-                let bits = segment::total_bits(mode, data, v).ok_or(EncodeError::ModeMismatch)?;
-                if bits <= data_capacity_bits(v, ec) {
-                    return Ok(v);
-                }
-            }
+/// Chooses the version and the segmentation to encode with.
+///
+/// With no forced version this walks the character-count groups in order,
+/// segmenting once per group and returning the first version whose data
+/// capacity holds the resulting bit stream — still the smallest fitting
+/// version, because the bit count is constant inside a group.
+fn resolve_plan(data: &[u8], options: &Options) -> Result<(Version, Vec<Segment>), EncodeError> {
+    let eci_bits = match options.eci {
+        Some(v) => segment::eci_bits(v).ok_or(EncodeError::InvalidEci)?,
+        None => 0,
+    };
+
+    if let Some(v) = options.version {
+        let segments = segments_for(data, v, options)?;
+        let bits =
+            segment::segments_bits(&segments, v).ok_or(EncodeError::ModeMismatch)? + eci_bits;
+        return if bits <= data_capacity_bits(v, options.ec) {
+            Ok((v, segments))
+        } else {
             Err(EncodeError::DataTooLarge)
+        };
+    }
+
+    for (first, last) in VERSION_GROUPS {
+        let anchor = Version::new(first).map_err(|_| EncodeError::InvalidVersion)?;
+        let segments = segments_for(data, anchor, options)?;
+        let bits =
+            segment::segments_bits(&segments, anchor).ok_or(EncodeError::ModeMismatch)? + eci_bits;
+        for n in first..=last {
+            let v = Version::new(n).map_err(|_| EncodeError::InvalidVersion)?;
+            if bits <= data_capacity_bits(v, options.ec) {
+                return Ok((v, segments));
+            }
         }
     }
+    Err(EncodeError::DataTooLarge)
 }
 
 /// Assembles the padded data-codeword stream (before block splitting).
-fn build_data_codewords(data: &[u8], mode: Mode, version: Version, ec: EcLevel) -> Vec<u8> {
+fn build_data_codewords(
+    data: &[u8],
+    segments: &[Segment],
+    eci: Option<u32>,
+    version: Version,
+    ec: EcLevel,
+) -> Vec<u8> {
     let capacity_bits = data_capacity_bits(version, ec);
     let mut buf = BitBuffer::new();
 
-    segment::write_mode_indicator(&mut buf, mode);
-    segment::write_char_count(&mut buf, mode, data.len(), version);
-    segment::write_payload(&mut buf, mode, data);
+    if let Some(value) = eci {
+        segment::write_eci(&mut buf, value);
+    }
+    segment::write_segments(&mut buf, data, segments, version);
 
     // Terminator: up to four zero bits, not exceeding capacity.
     let terminator = core::cmp::min(4, capacity_bits.saturating_sub(buf.len()));
@@ -193,7 +281,7 @@ fn build_data_codewords(data: &[u8], mode: Mode, version: Version, ec: EcLevel) 
 /// # Errors
 ///
 /// Returns [`EncodeError`] when the payload does not fit, or when a
-/// caller-forced mode, version or mask is invalid.
+/// caller-forced mode, version, mask or ECI number is invalid.
 pub fn encode(data: &[u8], options: Options) -> Result<BitMatrix, EncodeError> {
     if let Some(m) = options.mask
         && m > 7
@@ -201,11 +289,10 @@ pub fn encode(data: &[u8], options: Options) -> Result<BitMatrix, EncodeError> {
         return Err(EncodeError::InvalidMask);
     }
 
-    let mode = resolve_mode(data, options.mode)?;
-    let version = resolve_version(data, mode, options.ec, options.version)?;
+    let (version, segments) = resolve_plan(data, &options)?;
     let ec = options.ec;
 
-    let data_codewords = build_data_codewords(data, mode, version, ec);
+    let data_codewords = build_data_codewords(data, &segments, options.eci, version, ec);
     let blocks = ec_blocks(version, ec);
     let interleaved = matrix::interleave(&data_codewords, blocks);
 
