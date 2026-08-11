@@ -476,7 +476,6 @@ window.addEventListener('resize', () => {
 
 let downloadUrl = null;
 let downloadPngUrl = null;
-let genTimer = 0;
 let genSeq = 0;
 
 const downloadPng = el('download-png');
@@ -624,12 +623,10 @@ copyPng.addEventListener('click', async () => {
   setTimeout(() => (copyPng.textContent = original), 1500);
 });
 
-function scheduleRegenerate() {
-  clearTimeout(genTimer);
-  genTimer = setTimeout(regenerate, 120);
-}
-
-genText.addEventListener('input', scheduleRegenerate);
+// No debounce: encoding is microseconds, so the symbol updates on every
+// keystroke. The PNG rasterize is async and guarded by `genSeq`, so a stale
+// rasterize from a superseded keystroke is dropped, never displayed.
+genText.addEventListener('input', regenerate);
 genEc.addEventListener('change', regenerate);
 genMicro.addEventListener('change', () => {
   syncEcOptions();
