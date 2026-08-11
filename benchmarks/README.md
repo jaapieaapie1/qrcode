@@ -76,8 +76,8 @@ difference instead:
 ## Baseline
 
 Apple M4, macOS 26.4.1, rustc 1.96.0 (ac68faa20 2026-05-25), `bench` profile,
-2026-08-11. Measured in an isolated `git worktree` at clean HEAD (`ec4085e`)
-plus `benchmarks/`.
+2026-08-11 (post Step 11 performance rework). Measured at `a4920e5` in the
+repo working tree, quiesced.
 
 Verbatim `cargo bench -p benchmarks` output, so a fresh run can be diffed
 against it directly:
@@ -86,92 +86,88 @@ against it directly:
 qr-core — Reed-Solomon
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-rs_encode v1-M (16d/10ec) x256                       13744    67.75 µs    70.17 µs    92.08 µs   271.33 µs      55.7 MiB/s
-rs_correct v1-M (26cw) clean x256                    15222    65.08 µs    65.42 µs    68.08 µs   205.17 µs    255.54 ns/op
-rs_correct v1-M (26cw) 5 err x256                     4214   232.29 µs   237.58 µs   246.33 µs   632.79 µs    928.06 ns/op
-rs_encode v40-L (118d/30ec) x32                      13970    70.21 µs    71.25 µs    74.38 µs   306.79 µs      50.5 MiB/s
-rs_correct v40-L (148cw) clean x32                    3188   310.67 µs   312.92 µs   319.33 µs   534.96 µs   9778.66 ns/op
-rs_correct v40-L (148cw) 15 err x32                   1348   731.54 µs   742.67 µs   756.96 µs   930.29 µs  23208.34 ns/op
+rs_encode v1-M (16d/10ec) x256                       13498    60.79 µs    70.12 µs    96.50 µs     1.66 ms      55.7 MiB/s
+rs_correct v1-M (26cw) clean x256                    15473    58.12 µs    60.58 µs    77.50 µs   288.42 µs    236.66 ns/op
+rs_correct v1-M (26cw) 5 err x256                     3093   209.38 µs   235.25 µs   274.88 µs   615.96 µs    918.95 ns/op
+rs_encode v40-L (118d/30ec) x32                      13904    63.04 µs    70.46 µs    79.58 µs   258.21 µs      51.1 MiB/s
+rs_correct v40-L (148cw) clean x32                    2667   278.54 µs   283.08 µs   349.17 µs   677.25 µs   8846.38 ns/op
+rs_correct v40-L (148cw) 15 err x32                   1481   654.62 µs   665.58 µs   721.62 µs   863.42 µs  20799.47 ns/op
 
 qr-core — BCH format information
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-format_info_decode, 32 valid codes x256               3897   254.00 µs   254.58 µs   261.58 µs   950.17 µs     31.08 ns/op
-format_info_decode, 1-bit errors x256                 3911   254.04 µs   257.08 µs   264.58 µs   828.88 µs     31.38 ns/op
+format_info_decode, 32 valid codes x256               3974   226.92 µs   257.50 µs   437.54 µs     7.82 ms     31.43 ns/op
+format_info_decode, 1-bit errors x256                 3753   227.00 µs   255.08 µs   269.42 µs   813.54 µs     31.14 ns/op
 
 qr-core — GF(256)
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-gf::mul, 65536 ops                                   20000    37.17 µs    37.71 µs    41.75 µs   156.04 µs      0.58 ns/op
-gf::inv, 65536 ops                                   20000    33.33 µs    34.92 µs    36.88 µs    97.83 µs      0.53 ns/op
-
+gf::mul, 65536 ops                                   20000    33.33 µs    37.12 µs    41.29 µs   107.21 µs      0.57 ns/op
+gf::inv, 65536 ops                                   20000    29.79 µs    34.42 µs    37.33 µs   108.54 µs      0.53 ns/op
 
 qr-decode — decode()
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-decode v1-M, 8 numeric digits x64                     8151   105.17 µs   111.67 µs   119.79 µs   237.88 µs       4.4 MiB/s
-decode v10-M, 213B byte                              20000    37.96 µs    39.67 µs    76.29 µs   184.04 µs       5.1 MiB/s
-decode v40-L, 2953B byte                              1562   618.83 µs   629.88 µs   640.79 µs   767.50 µs       4.5 MiB/s
-decode v10-M, 65 modules flipped (49 cw fixed)       15779    60.88 µs    62.71 µs    65.12 µs   147.54 µs       3.2 MiB/s
+decode v1-M, 8 numeric digits x64                     9466    95.50 µs   110.58 µs   119.08 µs   367.54 µs       4.4 MiB/s
+decode v10-M, 213B byte                              20000    33.92 µs    38.75 µs    42.00 µs   408.96 µs       5.2 MiB/s
+decode v40-L, 2953B byte                              1616   555.96 µs   624.38 µs   649.88 µs     1.04 ms       4.5 MiB/s
+decode v10-M, 65 modules flipped (49 cw fixed)       16158    54.17 µs    61.62 µs    65.58 µs   180.29 µs       3.3 MiB/s
 
 qr-decode — decode_micro()
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-decode_micro M4-Q, 9 alphanum chars x64              11511    85.33 µs    88.08 µs    95.46 µs   396.21 µs       6.2 MiB/s
-
+decode_micro M4-Q, 9 alphanum chars x64              11646    76.75 µs    86.04 µs    91.92 µs   289.04 µs       6.4 MiB/s
 
 qr-detect — detect_luma(), 1280x720
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-happy path: 1 v5 symbol @8px/module                    455     2.10 ms     2.13 ms     2.21 ms     3.58 ms      432.29 M/s
-happy path, single pass (no retry)                     457     2.10 ms     2.13 ms     2.19 ms     2.64 ms      433.25 M/s
-rotated 30 degrees                                     465     2.12 ms     2.15 ms     2.28 ms     5.72 ms      428.49 M/s
-miss path: no symbol (primary + retry)                 244     4.02 ms     4.07 ms     4.15 ms     4.29 ms      226.71 M/s
-miss path, single pass (no retry)                      489     2.00 ms     2.04 ms     2.10 ms     5.05 ms      452.19 M/s
-miss path: flat frame (no symbol, no clutter)          145     6.83 ms     6.88 ms     7.00 ms     7.32 ms      133.98 M/s
-miss path: flat frame, single pass (no retry)          291     3.41 ms     3.44 ms     3.55 ms     7.00 ms      267.62 M/s
+happy path: 1 v5 symbol @8px/module                   1444   629.75 µs   687.17 µs   704.71 µs   806.50 µs     1341.16 M/s
+happy path, single pass (no retry)                    1449   626.50 µs   688.29 µs   725.92 µs     2.52 ms     1338.97 M/s
+rotated 30 degrees                                    1440   626.58 µs   688.04 µs   708.71 µs     1.08 ms     1339.45 M/s
+miss path: no symbol (primary + retry)                 883     1.05 ms     1.12 ms     1.15 ms     1.38 ms      823.19 M/s
+miss path, single pass (no retry)                     1775   508.83 µs   563.79 µs   580.92 µs   795.62 µs     1634.65 M/s
+miss path: flat frame (no symbol, no clutter)         2000   292.25 µs   320.38 µs   438.29 µs     2.21 ms     2876.63 M/s
+miss path: flat frame, single pass (no retry)         2000   288.33 µs   314.29 µs   340.96 µs   912.62 µs     2932.30 M/s
 
 qr-detect — Micro QR, 1280x720
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-detect_micro_luma: 1 M4 symbol @8px/module             457     2.14 ms     2.19 ms     2.72 ms     5.42 ms      421.01 M/s
-detect_all_luma: 1 v5 + 1 M4                           385     2.54 ms     2.58 ms     2.71 ms     2.87 ms      356.96 M/s
-
+detect_micro_luma: 1 M4 symbol @8px/module            1313   706.50 µs   760.46 µs   779.17 µs   815.04 µs     1211.90 M/s
+detect_all_luma: 1 v5 + 1 M4                           891     1.06 ms     1.12 ms     1.15 ms     2.67 ms      824.02 M/s
 
 qr-encode — encode()
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-encode v1-M, 8 numeric digits                        20000    40.92 µs    42.42 µs    45.08 µs   354.50 µs     184.2 KiB/s
-encode v10-M, 198B URL-ish (auto version)             1540   533.38 µs   610.71 µs     1.51 ms    27.84 ms     316.6 KiB/s
-encode v40-L, 2953B byte (auto version)                 92     9.70 ms    10.21 ms    12.62 ms    16.30 ms     282.3 KiB/s
+encode v1-M, 8 numeric digits                        20000     8.79 µs     9.00 µs     9.25 µs    36.71 µs     868.1 KiB/s
+encode v10-M, 198B URL-ish (auto version)            19978    44.75 µs    49.75 µs    51.96 µs   143.88 µs       3.8 MiB/s
+encode v40-L, 2953B byte (auto version)               1587   553.58 µs   600.50 µs   664.88 µs   983.42 µs       4.7 MiB/s
 
 qr-encode — DP segmentation cost (same version, DP on vs off)
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-v10-M URL-ish, version pinned, DP on                  1518   548.08 µs   632.12 µs   903.00 µs    10.03 ms     305.9 KiB/s
-v10-M URL-ish, version pinned, mode=Byte (no DP)      1651   542.17 µs   629.04 µs   852.08 µs     1.73 ms     307.4 KiB/s
-v40-L byte, version pinned, DP on                       97     9.66 ms     9.83 ms    11.27 ms    26.40 ms     293.4 KiB/s
-v40-L byte, version pinned, mode=Byte (no DP)          101     9.65 ms     9.85 ms    12.02 ms    14.72 ms     292.8 KiB/s
+v10-M URL-ish, version pinned, DP on                 18592    43.12 µs    47.96 µs    49.08 µs   114.17 µs       3.9 MiB/s
+v10-M URL-ish, version pinned, mode=Byte (no DP)     20000    41.54 µs    46.12 µs    48.71 µs   139.25 µs       4.1 MiB/s
+v40-L byte, version pinned, DP on                     1659   537.04 µs   578.50 µs   606.54 µs   765.46 µs       4.9 MiB/s
+v40-L byte, version pinned, mode=Byte (no DP)         1817   521.79 µs   561.54 µs   592.46 µs   798.12 µs       5.0 MiB/s
 
 qr-encode — mask selection cost (auto vs pinned)
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-encode v1-M, 8 digits: mask auto (8 candidates)      20000    41.21 µs    42.08 µs    71.71 µs     1.57 ms     185.6 KiB/s
-encode v1-M, 8 digits: mask = Some(0) pinned         20000     3.04 µs     3.21 µs     3.33 µs    10.04 µs       2.4 MiB/s
-encode v40-L, 2953B: mask auto (8 candidates)          102     9.59 ms     9.81 ms    10.07 ms    10.21 ms     293.8 KiB/s
-encode v40-L, 2953B: mask = Some(0) pinned            1320   710.67 µs   744.50 µs     1.06 ms     3.27 ms       3.8 MiB/s
+encode v1-M, 8 digits: mask auto (8 candidates)      20000     8.12 µs     9.12 µs     9.29 µs    33.08 µs     856.2 KiB/s
+encode v1-M, 8 digits: mask = Some(0) pinned         20000     1.58 µs     1.71 µs     1.79 µs     9.33 µs       4.5 MiB/s
+encode v40-L, 2953B: mask auto (8 candidates)         1639   570.75 µs   604.54 µs   627.71 µs     1.29 ms       4.7 MiB/s
+encode v40-L, 2953B: mask = Some(0) pinned            4171   185.42 µs   219.54 µs   232.46 µs   446.71 µs      12.8 MiB/s
 
 qr-encode — encode_micro()
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-encode_micro M4-Q, 9 alphanumeric chars              50000     4.79 µs     5.08 µs     5.21 µs    69.46 µs       1.7 MiB/s
-
+encode_micro M4-Q, 9 alphanumeric chars              50000     4.38 µs     4.96 µs     5.04 µs    22.42 µs       1.7 MiB/s
 
 qr-video — process_frame(), 1280x720 (rate is frames/s)
 bench                                                iters         min      median         p95         max            rate
 --------------------------------------------------------------------------------------------------------------------------
-steady-state ROI frame (code present)                 1108   883.25 µs   902.71 µs     1.02 ms     1.81 ms        1.11 k/s
-full-scan cadence frame (code present)                 471     2.11 ms     2.15 ms     2.64 ms     6.00 ms        464.3 /s
+steady-state ROI frame (code present)                 3047   293.25 µs   324.25 µs   334.83 µs   439.12 µs        3.08 k/s
+full-scan cadence frame (code present)                1449   629.33 µs   688.25 µs   708.88 µs   953.04 µs        1.45 k/s
 ```
 
 Per-symbol figures for the batched rows: `decode` v1-M is 111.67 µs / 64 =
@@ -181,23 +177,18 @@ Per-symbol figures for the batched rows: `decode` v1-M is 111.67 µs / 64 =
 
 ## What the baseline says
 
-### Encoding is 92 % mask selection — measured, not inferred
+### Mask selection dominated encoding; word-level scoring fixed it
 
-| | median | pinned to one mask | selection's share |
-|---|---:|---:|---:|
-| `encode()` v1-M, 8 digits | 42.08 µs | 3.21 µs | **92.4 %** |
-| `encode()` v40-L, 2953 B | 9.81 ms | 744.50 µs | **92.4 %** |
+Historical (pre `a4920e5`): mask selection was a measured 92.4 % of `encode()`
+at both ends of the version range (v1-M 42.08 µs auto vs 3.21 µs pinned;
+v40-L 9.81 ms vs 744.50 µs) — eight candidate matrices, each fully placed and
+penalty-scored through per-module predicate calls.
 
-Eight candidate matrices, each fully placed and penalty-scored, are more than
-nine tenths of `encode()` at both ends of the version range. Everything else
-combined — segmentation, padding, Reed-Solomon, interleaving, placement of the
-one mask that gets kept — is the remaining 8 %. The RS inside a v1 encode is
-256 ns, 0.6 % of the total.
-
-That is the whole optimisation story for the encoder. It is also why `encode()`
-costs 24x what `decode()` does on the same v1 symbol (42.08 µs vs 1.74 µs): the
-decoder never scores a mask, it reads which one was used out of the format
-information.
+Step 11b rebuilt the search on packed u64 rows (function map as bitmaps,
+candidates via XOR, shared run-walk for N1/N3, blocked bit transpose for the
+column direction, popcount N4), bit-identical to the reference scorer. Current
+numbers in the baseline above: v1-M auto 9.12 µs, v40-L auto 604 µs — 16x on
+v40 — with the auto/pinned gap now ~4x instead of ~13x.
 
 ### The segmentation DP is free
 
@@ -211,46 +202,31 @@ about the DP by construction: its payload is `pseudo_bytes`, every byte ≥ 0x80
 so there is no alternative segmentation for the DP to weigh. It is there to show
 the cost does not grow with payload size, not to show the DP is cheap.
 
-### A featureless frame is the detector's worst case, not its best
+### A featureless frame was the worst case; now it is the best
 
-A blank 720p frame takes 6.88 ms — 3.2x the happy path (2.13 ms) and 1.7x the
-*cluttered* symbol-free frame (4.07 ms). Single-pass: 3.44 ms flat against
-2.04 ms cluttered.
-
-The mechanism is `crates/qr-detect/src/binarize.rs:90-96`:
-
-```rust
-let dark_count = bin.dark.iter().filter(|&&d| d).count();
-if dark_count == 0 || dark_count == total {
-    return Some(otsu(luma, width, height));
-}
-```
-
-On a uniform frame the Bradley pass yields `dark_count == 0`, so the completed
-adaptive result — integral image plus 921 600 window evaluations — is thrown
-away and a full Otsu pass (histogram, threshold application, a second
-`Vec<bool>`) runs over the whole frame on top of it. **Two binarizations instead
-of one.** The 1.40 ms single-pass delta is exactly one Otsu pass over 921 600
-pixels. Then `detect_luma` finds nothing and retries, doing the whole thing
-again — hence 6.88 ms.
-
-It is *not* extra finder scanning. The binary image that comes out is uniform,
-so the finder scan on a flat frame is the cheapest it ever gets.
+Historical (pre `5c7f732`): a blank frame cost 6.88 ms — the Bradley pass
+completed, produced zero dark pixels, was discarded, and a full Otsu ran on
+top; the retry then repeated both. Step 11a added the `can_be_dark`
+dynamic-range proof: a frame whose `min/max` spread cannot yield a dark pixel
+skips the adaptive pass entirely, and the result is marked radius-invariant so
+the retry is skipped too. Current: flat frame 321 µs, the cheapest frame in
+the table — where a camera pointed at nothing spends its time now matches
+what the frame deserves.
 
 ### The retry pass is a clean doubling
 
-Miss-path `detect_luma` is almost exactly 2x `detect_luma_single_pass` on both
-symbol-free frames (4.07 vs 2.04 ms; 6.88 vs 3.44 ms) — the retry is a second
-full binarize-and-scan, as designed. It costs nothing on the happy path (2.13 ms
-either way), because a usable primary result short-circuits it.
+Miss-path `detect_luma` remains ~2x `detect_luma_single_pass` on cluttered
+symbol-free frames (1.12 ms vs 564 µs) — the retry is a second full
+binarize-and-scan, as designed. Flat frames no longer retry at all
+(radius-invariant short-circuit). The happy path is unaffected either way.
 
 ### Rotation is nearly free
 
-30 degrees costs 1 % over axis-aligned (2.15 vs 2.13 ms). The perspective
+30 degrees costs ~0 % over axis-aligned (688 both, medians). The perspective
 sampler is not where detection time goes; binarize is.
 
 ### ROI tracking earns its keep
 
-A steady-state ROI frame is 902.71 µs against 2.15 ms for a full scan — 2.4x, or
-1110 fps of headroom against 464. The ROI is padded 50 % by default, so the win
-is bounded by how much of the frame it still covers.
+A steady-state ROI frame is 324 µs against 688 µs for a full scan — 2.1x, or
+~3080 fps of headroom against ~1450. The ROI is padded 50 % by default, so the
+win is bounded by how much of the frame it still covers.
