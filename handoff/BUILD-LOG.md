@@ -5,7 +5,7 @@
 
 ## Current Status
 
-**Active step:** none — Step 7 COMPLETE (esp-selftest committed, esp32-emulation CI job green on GitHub in 54s: run 31439384048).
+**Active step:** Step 9 (benchmarks) BUILT, awaiting review — see `handoff/REVIEW-REQUEST-bench.md`. Step 7 COMPLETE (esp-selftest committed, esp32-emulation CI job green on GitHub in 54s: run 31439384048).
 **Last cleared:** Waves 1–3 complete + Step 4 detect fix (afa3d30) + CI (f13fa3a)
 **Pending deploy:** NO — remote github.com/jaapieaapie1/qrcode (private), CI green incl. esp32-emulation
 
@@ -18,6 +18,44 @@ Wave 4 decisions:
 ---
 
 ## Step History
+
+### Step 9 — benchmarks — BUILT, AWAITING REVIEW
+*Date: 2026-08-11 · Builder: Bob-BM · Review request: `handoff/REVIEW-REQUEST-bench.md`*
+
+New workspace member `benchmarks/`. Hand-rolled harness, **zero new
+dependencies** (no criterion, no `test::Bencher`).
+
+Files changed:
+- `Cargo.toml` — `"benchmarks"` added to `members` (only root edit)
+- `benchmarks/Cargo.toml` — dev-deps on the six qr crates + `image`; `autobenches = false`; five `[[bench]]` entries with `harness = false`; own `micro` feature forwarding to siblings
+- `benchmarks/src/lib.rs` — harness: auto-calibration to ~1s/bench, warmup, per-iteration timing, min/median/p95/max, throughput/ns-op column, aligned table, `BENCH_QUICK=1` smoke mode
+- `benchmarks/benches/common/mod.rs` — in-code fixtures: luma conversion, 720p frame building, blit, bilinear rotate, deterministic payloads, capacity-filling symbols
+- `benchmarks/benches/{core,encode,decode,detect,video}.rs` — the five bench targets
+- `benchmarks/README.md` — run instructions + full baseline table (Apple M4, rustc 1.96.0, 2026-08-11) + commentary
+- `.github/workflows/ci.yml` — new `bench-smoke` job: `BENCH_QUICK=1 cargo bench -p benchmarks` (build-and-run gate, not a perf gate)
+
+Key decisions:
+- **Dev-deps take the siblings at `workspace = true`.** Round 1 used explicit paths with `default-features = false`, justified as protecting CI's `--no-default-features` lane. Richard-BM proved that false: the lane is already unified `micro`-on at HEAD via `tests-integration` → `qr-video` → `qr-detect`, and `benchmarks` cannot close it. Reverted to the convention; the escalation about that lane is his, below.
+- **Sub-microsecond benches batch internally** (`xB` in the name) because a single `Instant::now` pair (~41 ns on this machine) is the same order as the work. Covers GF, BCH, small RS, `decode` v1, `decode_micro`.
+- **Three stages have no public entry point and are measured by difference**: binarize+scan as `detect_luma_single_pass` (retry = the gap to `detect_luma`), the DP as pinned-version `mode: None` vs `Some(Byte)`, mask selection as `mask: None` vs `Some(0)`.
+- **Every fixture asserts its identity** (version, decoded payload on both upright and rotated frames, detection counts on all four detector frames including both single-pass outcomes, `Stats` deltas for video) before timing, so a bench cannot silently drift onto another code path.
+- Answers KG-15's ask in passing: the qr-video benches use a real decodable fixture and assert `roi_hits > 0` with `full_scans` unchanged, so steady-state ROI is genuinely what is measured.
+
+Headline baseline (medians, Apple M4, verbatim table in `benchmarks/README.md`):
+encode v1-M 42.42 µs · encode v40-L 10.21 ms · decode v1-M 1.74 µs · decode
+v40-L 629.88 µs · detect 720p happy 2.13 ms · detect 720p miss 4.07 ms (flat
+frame 6.88 ms) · video ROI frame 902.71 µs · video full-scan frame 2.15 ms ·
+`gf::mul` 0.58 ns/op.
+
+Findings: **mask selection is 92.4% of `encode()`** at both v1 and v40 (auto
+42.08 µs vs `mask: Some(0)` 3.21 µs; 9.81 ms vs 744.50 µs) — measured, not
+inferred, and it is why encode costs 24x decode on the same symbol. The
+segmentation DP costs ~1% on min and nothing on median. Rotation costs 1%. ROI
+tracking gives 2.4x. New gap KG-17 below.
+
+Guards: `cargo test --workspace` and `--no-default-features` green; clippy
+`-D warnings` clean on both lanes; `cargo fmt --all --check` clean; full bench
+suite and `BENCH_QUICK=1` both run clean.
 
 ### Step 0 — Workspace scaffold — COMPLETE
 *Date: 2026-07-23*
@@ -198,6 +236,7 @@ See handoff/REVIEW-REQUEST-esp-selftest.md.
 - **KG-14** — micro detect: function_mismatches hardcodes the micro function map, tied to qr-core only by debug_assert — logged 2026-08-10
 - **KG-15** — qr-video: fixtures never decode, so its suite only exercises the retry double-pass path; detect_full single-pass-hit case uncovered. Add one decodable fixture next time in that crate (Richard-BIN MINOR-6) — logged 2026-08-11
 - **KG-16** — detect: multi-code vignette frame where /8 finds one code suppresses retry for a second code needing /16 — documented crate-docs limitation, accepted — logged 2026-08-11
+- **KG-17** — detect: a *featureless* frame binarizes twice. `binarize.rs:90-96` discards the completed Bradley pass (integral image + 921,600 window evaluations) when `dark_count == 0 || dark_count == total` and runs a full Otsu pass over the whole frame on top of it. A uniform frame always hits `dark_count == 0`, so it pays for two binarizations instead of one; `detect_luma` then finds nothing and retries, doing both again. Measured in Step 9 on 720p: flat frame 6.88 ms vs cluttered symbol-free frame 4.07 ms vs happy path 2.13 ms; single-pass 3.44 ms flat vs 2.04 ms cluttered, and that 1.40 ms delta is exactly one Otsu pass over 921,600 px. NOT finder-scan cost — the resulting binary image is uniform, so the finder scan on a flat frame is the cheapest it ever gets (root cause identified by Richard-BM, correcting Bob's initial guess). Fix is small and local to `binarize.rs`: decide before paying for the adaptive pass, or reuse its statistics. Richard recommends its own step against qr-detect rather than leaving it here — logged 2026-08-11
 
 ---
 

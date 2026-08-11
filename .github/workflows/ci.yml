@@ -25,6 +25,11 @@ jobs:
         run: cargo test --workspace
       - name: Test workspace (no default features)
         run: cargo test --workspace --no-default-features
+      # Workspace feature unification keeps qr-core's `micro` on via
+      # tests-integration/qr-video defaults, so test the true micro-off
+      # build of the foundation crate on its own.
+      - name: Test qr-core with micro off
+        run: cargo test -p qr-core --no-default-features
 
   lint:
     name: Clippy + fmt
@@ -41,6 +46,23 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Clippy (no default features)
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+  bench-smoke:
+    name: Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # This is a build-and-run gate, not a performance gate. BENCH_QUICK cuts
+      # every bench to three iterations, so the job proves the bench targets
+      # compile, their in-code fixtures still assert clean (right version, right
+      # decoded payload, right detection count) and every bench runs to
+      # completion. Timings from a shared CI runner are not comparable between
+      # runs, so nothing here is thresholded — the baseline in
+      # benchmarks/README.md is measured on a known machine instead.
+      - name: Run bench suite in smoke mode
+        run: BENCH_QUICK=1 cargo bench -p benchmarks
 
   cross-targets:
     name: Cross-target checks

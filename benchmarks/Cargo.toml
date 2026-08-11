@@ -1,0 +1,64 @@
+[package]
+name = "benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+# Every bench target is declared explicitly below (they all need
+# `harness = false`), and `benches/common/` is a shared module rather than a
+# target, so auto-discovery would only get in the way.
+autobenches = false
+
+[dependencies]
+# None. The harness in `src/lib.rs` is std-only on purpose: the benched crates
+# are dev-dependencies, so nothing that measures can accidentally be measured.
+
+[dev-dependencies]
+qr-core = { workspace = true }
+qr-encode = { workspace = true }
+qr-decode = { workspace = true }
+qr-detect = { workspace = true }
+qr-render = { workspace = true }
+qr-video = { workspace = true }
+image = { workspace = true }
+
+[features]
+default = ["micro"]
+# Gates this crate's own Micro QR benches, and forwards the feature the way every
+# other crate in the workspace does so the polarity stays identical everywhere.
+#
+# In-workspace the forwarding is a no-op: the siblings are taken at their
+# defaults above, which already carry `micro`. It matters only for a build that
+# selects `benchmarks` with `--no-default-features` and resolves features over a
+# package set that excludes qr-video and tests-integration.
+micro = [
+    "qr-core/micro",
+    "qr-encode/micro",
+    "qr-decode/micro",
+    "qr-detect/micro",
+]
+
+[[bench]]
+name = "core"
+path = "benches/core.rs"
+harness = false
+
+[[bench]]
+name = "encode"
+path = "benches/encode.rs"
+harness = false
+
+[[bench]]
+name = "decode"
+path = "benches/decode.rs"
+harness = false
+
+[[bench]]
+name = "detect"
+path = "benches/detect.rs"
+harness = false
+
+[[bench]]
+name = "video"
+path = "benches/video.rs"
+harness = false
