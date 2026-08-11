@@ -62,6 +62,7 @@ extern crate std;
 
 mod bits;
 mod matrix;
+mod packed;
 mod segment;
 
 #[cfg(feature = "micro")]
@@ -296,29 +297,14 @@ pub fn encode(data: &[u8], options: Options) -> Result<BitMatrix, EncodeError> {
     let blocks = ec_blocks(version, ec);
     let interleaved = matrix::interleave(&data_codewords, blocks);
 
-    // Factory producing a fresh function-patterned, data-placed (unmasked)
-    // matrix. Used once per candidate mask during selection.
-    let build_unmasked = || {
-        let mut m = BitMatrix::new(version.size());
-        matrix::place_function_patterns(&mut m, version);
-        matrix::place_data(&mut m, version, &interleaved);
-        m
-    };
-
-    let final_matrix = match options.mask {
-        Some(mask) => {
-            let mut m = build_unmasked();
-            matrix::apply_mask(&mut m, version, mask);
-            matrix::place_format_info(&mut m, version, ec, mask);
-            if version.number() >= 7 {
-                matrix::place_version_info(&mut m, version);
-            }
-            m
-        }
-        None => matrix::choose_mask(build_unmasked, version, ec).1,
-    };
-
-    Ok(final_matrix)
+    // Placement, masking and (when no mask is forced) the eight-candidate
+    // penalty comparison all run on the word-packed grid.
+    Ok(packed::build_symbol(
+        version,
+        ec,
+        &interleaved,
+        options.mask,
+    ))
 }
 
 #[cfg(test)]

@@ -104,7 +104,7 @@ fn annex_i_full_symbol_roundtrip() {
 
     // Undo the mask (XOR is its own inverse), then read the codewords back.
     let mut unmasked = m.clone();
-    matrix::apply_mask(&mut unmasked, v, mask);
+    matrix::reference::apply_mask(&mut unmasked, v, mask);
     let inter = extract_interleaved(&unmasked, v, 26);
     assert_eq!(&inter[..16], &ANNEX_I_DATA);
     assert_eq!(&inter[16..], &ANNEX_I_EC);
@@ -158,7 +158,7 @@ fn byte_mode_roundtrips_through_ec_correction() {
 
     let (_, mask) = format_info_decode(read_format_bits(&m)).unwrap();
     let mut unmasked = m.clone();
-    matrix::apply_mask(&mut unmasked, v, mask);
+    matrix::reference::apply_mask(&mut unmasked, v, mask);
 
     let total = blocks.total_codewords() as usize;
     let inter = extract_interleaved(&unmasked, v, total);
@@ -210,11 +210,20 @@ fn deinterleave(inter: &[u8], blocks: qr_core::EcBlocks) -> Vec<Vec<u8>> {
 fn n1_run_penalty_counts_long_runs() {
     // A run of exactly five same-colour modules scores 3; each extra adds 1.
     let five = [true, true, true, true, true, false];
-    assert_eq!(matrix::line_run_penalty(|i| five[i as usize], 6), 3);
+    assert_eq!(
+        matrix::reference::line_run_penalty(|i| five[i as usize], 6),
+        3
+    );
     let seven = [true; 7];
-    assert_eq!(matrix::line_run_penalty(|i| seven[i as usize], 7), 5);
+    assert_eq!(
+        matrix::reference::line_run_penalty(|i| seven[i as usize], 7),
+        5
+    );
     let short = [true, true, false, true, true, false, true];
-    assert_eq!(matrix::line_run_penalty(|i| short[i as usize], 7), 0);
+    assert_eq!(
+        matrix::reference::line_run_penalty(|i| short[i as usize], 7),
+        0
+    );
 }
 
 #[test]
@@ -225,13 +234,13 @@ fn n3_finder_penalty_detects_pattern() {
         false, false, false, false, true, false, true, true, true, false, true,
     ];
     assert_eq!(
-        matrix::finder_penalty(|i| line[i as usize], line.len() as u32),
+        matrix::reference::finder_penalty(|i| line[i as usize], line.len() as u32),
         40
     );
     // A line with no finder-like pattern scores nothing.
     let plain = [false, true, false, true, false, true, false, true, false];
     assert_eq!(
-        matrix::finder_penalty(|i| plain[i as usize], plain.len() as u32),
+        matrix::reference::finder_penalty(|i| plain[i as usize], plain.len() as u32),
         0
     );
 }
