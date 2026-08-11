@@ -119,23 +119,50 @@ fn horizontal_center(bin: &Binary, x: i64, y: i64) -> f64 {
     (left as f64 + right as f64) / 2.0
 }
 
+/// Length of the run of `color` at the front of `rest`.
+///
+/// Blocked rather than element-at-a-time: the per-block `any` is a branchless
+/// reduction the backend can vectorize, so a long uniform stretch — most of any
+/// camera frame — is skipped a block at a time and only the block holding the
+/// run's end is walked. A short run pays one failed block test.
+fn run_length(rest: &[bool], color: bool) -> usize {
+    const BLOCK: usize = 32;
+    let mut blocks = rest.chunks_exact(BLOCK);
+    let mut base = 0;
+    for block in &mut blocks {
+        if block.iter().any(|&c| c != color) {
+            break;
+        }
+        base += BLOCK;
+    }
+    base + rest[base..]
+        .iter()
+        .position(|&c| c != color)
+        .unwrap_or(rest.len() - base)
+}
+
 /// Scans the binary image and returns clustered finder candidates.
 pub fn find_finders(bin: &Binary) -> Vec<Finder> {
-    let width = bin.width() as i64;
     let height = bin.height() as i64;
     let mut raw: Vec<(f64, f64, f64)> = Vec::new(); // (cx, cy, module)
+    let mut runs: Vec<(bool, i64, i64)> = Vec::new();
 
     for y in 0..height {
         // Collect runs across the row as (is_dark, length, start_x).
-        let mut runs: Vec<(bool, i64, i64)> = Vec::new();
-        let mut x = 0;
-        while x < width {
-            let color = bin.get(x, y);
-            let start = x;
-            while x < width && bin.get(x, y) == color {
-                x += 1;
-            }
-            runs.push((color, x - start, start));
+        //
+        // This is the only stage that touches every pixel after binarization,
+        // so how it reads them matters. Walking the row as a slice and finding
+        // each run's end with `position` — a search the backend can vectorize —
+        // replaces a bounds-checked `Binary::get` per pixel; the buffer is
+        // reused across rows rather than reallocated per row.
+        runs.clear();
+        let row = bin.row(y as u32);
+        let mut start = 0usize;
+        while start < row.len() {
+            let color = row[start];
+            let len = run_length(&row[start..], color);
+            runs.push((color, len as i64, start as i64));
+            start += len;
         }
 
         // Slide a window of five runs: dark, light, dark, light, dark.

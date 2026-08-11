@@ -53,6 +53,16 @@
 //! decoded anything, a pass that at least located a symbol still beats one that
 //! located none.
 //!
+//! ## When the retry is skipped outright
+//!
+//! Some frames settle the question at the first pass: the binarization never
+//! consulted the radius it was handed, so the second radius would rebuild the
+//! same image and rescan it to the same answer. That happens when the frame is
+//! too small for an adaptive window to mean anything, and — the case that costs
+//! real time — when its dynamic range is too narrow for any pixel to fall below
+//! its local mean, which is every blank or near-blank camera frame. Those return
+//! after one pass. See `binarize::Binary::is_radius_invariant`.
+//!
 //! ## What the retry does not cover
 //!
 //! The trigger is "nothing usable", not "nothing new". An image holding two
@@ -133,11 +143,11 @@ pub fn detect(img: &GrayImage) -> Vec<Detection> {
 /// Runs the retry pass when the primary yields nothing usable — see the crate
 /// docs for what "usable" means and how the two passes are compared.
 pub fn detect_luma(luma: &[u8], width: u32, height: u32) -> Vec<Detection> {
-    let primary = detect_luma_single_pass(luma, width, height);
-    if usable_qr(&primary) > 0 {
+    let (primary, settled) = detect_qr_at(luma, width, height, PRIMARY_WINDOW_DIV);
+    if settled || usable_qr(&primary) > 0 {
         return primary;
     }
-    let retry = detect_qr_at(luma, width, height, RETRY_WINDOW_DIV);
+    let (retry, _) = detect_qr_at(luma, width, height, RETRY_WINDOW_DIV);
     better_pass(primary, retry, usable_qr)
 }
 
@@ -189,13 +199,33 @@ fn better_pass<T>(primary: Vec<T>, retry: Vec<T>, usable: impl Fn(&[T]) -> usize
 /// [`detect_luma`] recovers and this function does not is, by construction, one
 /// the retry pass found.
 pub fn detect_luma_single_pass(luma: &[u8], width: u32, height: u32) -> Vec<Detection> {
-    detect_qr_at(luma, width, height, PRIMARY_WINDOW_DIV)
+    detect_qr_at(luma, width, height, PRIMARY_WINDOW_DIV).0
 }
 
-fn detect_qr_at(luma: &[u8], width: u32, height: u32, window_div: usize) -> Vec<Detection> {
-    scan(luma, width, height, window_div)
+/// A pass's detections, plus whether the frame *settled* it — see
+/// [`settled_by_binarization`].
+type Pass<T> = (Vec<T>, bool);
+
+/// Whether a second pass at another radius is provably pointless.
+///
+/// True when the binarization did not depend on the radius it was given
+/// (`Binary::is_radius_invariant`), so the retry would rebuild the same image,
+/// rescan it and reach the same answer. A blank camera frame is the case that
+/// matters: it used to pay two full binarizations per pass and two passes.
+///
+/// The `None` arm folds in the other dead retry — a luma buffer whose length
+/// does not match its stated dimensions is rejected identically at both radii.
+fn settled_by_binarization(bin: Option<&Binary>) -> bool {
+    bin.is_none_or(Binary::is_radius_invariant)
+}
+
+fn detect_qr_at(luma: &[u8], width: u32, height: u32, window_div: usize) -> Pass<Detection> {
+    let scanned = scan(luma, width, height, window_div);
+    let settled = settled_by_binarization(scanned.as_ref().map(|(bin, ..)| bin));
+    let dets = scanned
         .map(|(bin, _, candidates, _)| collect_qr(&bin, &candidates))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    (dets, settled)
 }
 
 /// What [`scan`] produces: the binarized image, every located finder, the QR
@@ -304,11 +334,11 @@ pub fn detect_micro(img: &GrayImage) -> Vec<MicroDetection> {
 /// the distinction does not arise there.
 #[cfg(feature = "micro")]
 pub fn detect_micro_luma(luma: &[u8], width: u32, height: u32) -> Vec<MicroDetection> {
-    let primary = detect_micro_luma_single_pass(luma, width, height);
-    if usable_micro(&primary) > 0 {
+    let (primary, settled) = detect_micro_at(luma, width, height, PRIMARY_WINDOW_DIV);
+    if settled || usable_micro(&primary) > 0 {
         return primary;
     }
-    let retry = detect_micro_at(luma, width, height, RETRY_WINDOW_DIV);
+    let (retry, _) = detect_micro_at(luma, width, height, RETRY_WINDOW_DIV);
     better_pass(primary, retry, usable_micro)
 }
 
@@ -329,14 +359,22 @@ fn usable_micro(dets: &[MicroDetection]) -> usize {
 /// apart.
 #[cfg(feature = "micro")]
 pub fn detect_micro_luma_single_pass(luma: &[u8], width: u32, height: u32) -> Vec<MicroDetection> {
-    detect_micro_at(luma, width, height, PRIMARY_WINDOW_DIV)
+    detect_micro_at(luma, width, height, PRIMARY_WINDOW_DIV).0
 }
 
 #[cfg(feature = "micro")]
-fn detect_micro_at(luma: &[u8], width: u32, height: u32, window_div: usize) -> Vec<MicroDetection> {
-    scan(luma, width, height, window_div)
+fn detect_micro_at(
+    luma: &[u8],
+    width: u32,
+    height: u32,
+    window_div: usize,
+) -> Pass<MicroDetection> {
+    let scanned = scan(luma, width, height, window_div);
+    let settled = settled_by_binarization(scanned.as_ref().map(|(bin, ..)| bin));
+    let dets = scanned
         .map(|(bin, finders, _, used)| collect_micro(&bin, &finders, &used))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    (dets, settled)
 }
 
 /// Detects QR and Micro QR symbols in one pass, returning `(qr, micro)`.
@@ -364,11 +402,11 @@ pub fn detect_all_luma(
     width: u32,
     height: u32,
 ) -> (Vec<Detection>, Vec<MicroDetection>) {
-    let (qr, micro) = detect_all_at(luma, width, height, PRIMARY_WINDOW_DIV);
-    if usable_qr(&qr) + usable_micro(&micro) > 0 {
+    let ((qr, micro), settled) = detect_all_at(luma, width, height, PRIMARY_WINDOW_DIV);
+    if settled || usable_qr(&qr) + usable_micro(&micro) > 0 {
         return (qr, micro);
     }
-    let (retry_qr, retry_micro) = detect_all_at(luma, width, height, RETRY_WINDOW_DIV);
+    let ((retry_qr, retry_micro), _) = detect_all_at(luma, width, height, RETRY_WINDOW_DIV);
 
     // Same ranking as the single-symbology paths, over the combined totals.
     let primary_score = (
@@ -392,15 +430,18 @@ fn detect_all_at(
     width: u32,
     height: u32,
     window_div: usize,
-) -> (Vec<Detection>, Vec<MicroDetection>) {
-    scan(luma, width, height, window_div)
+) -> ((Vec<Detection>, Vec<MicroDetection>), bool) {
+    let scanned = scan(luma, width, height, window_div);
+    let settled = settled_by_binarization(scanned.as_ref().map(|(bin, ..)| bin));
+    let dets = scanned
         .map(|(bin, finders, candidates, used)| {
             (
                 collect_qr(&bin, &candidates),
                 collect_micro(&bin, &finders, &used),
             )
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    (dets, settled)
 }
 
 #[cfg(feature = "micro")]

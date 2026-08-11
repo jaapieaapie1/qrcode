@@ -1,9 +1,10 @@
 //! Grayscale-to-binary conversion.
 //!
 //! Primary path is Bradley-style adaptive thresholding: each pixel is compared
-//! against the mean of a local window (computed in O(1) via an integral image).
-//! For very small images — or when the adaptive result degenerates to a single
-//! colour — we fall back to a global Otsu threshold.
+//! against the mean of a local window, computed in O(1) from a sliding column
+//! sum and a per-row prefix (see [`adaptive_at`]). For very small images — or
+//! when the adaptive result degenerates to a single colour — we fall back to a
+//! global Otsu threshold.
 //!
 //! The window radius is a parameter, not a constant, and there are two settings
 //! of it: [`PRIMARY_WINDOW_DIV`] and [`RETRY_WINDOW_DIV`]. Neither holds every
@@ -14,12 +15,15 @@
 //! radius and, only when that yields nothing at all, tries the whole frame again
 //! at the retry radius. See the crate docs for what that costs.
 
+use core::ops::{Add, Mul, Sub};
+
 /// A binarized image. `true` = dark module, `false` = light. Coordinates are
 /// `(x, y)` = (column, row), origin top-left.
 pub struct Binary {
     width: u32,
     height: u32,
     dark: Vec<bool>,
+    radius_invariant: bool,
 }
 
 impl Binary {
@@ -33,6 +37,35 @@ impl Binary {
     #[inline]
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Whether this image would come out identical at any other window radius.
+    ///
+    /// True when the adaptive pass was never run because the frame ruled it out
+    /// — the image is too small for a window to mean anything, or its dynamic
+    /// range is too narrow for any pixel to fall below its local mean (see
+    /// [`can_be_dark`]). Both conditions are properties of the frame alone, and
+    /// the global fallback that produced this image does not take a radius, so a
+    /// second pass at the retry radius would recompute this exact result.
+    ///
+    /// The pipeline uses it to skip that pass. It is not merely "the fallback
+    /// ran": when the fallback runs *because the adaptive pass came back empty*,
+    /// another radius genuinely might not, and this stays false.
+    #[inline]
+    pub fn is_radius_invariant(&self) -> bool {
+        self.radius_invariant
+    }
+
+    /// Row `y` as a contiguous slice, left to right.
+    ///
+    /// The finder scan is the only stage that reads every pixel, and reading
+    /// them one [`get`](Self::get) at a time costs it a bounds check and an
+    /// `i64 -> usize` conversion per pixel. Handing it the row lets it walk a
+    /// slice instead.
+    #[inline]
+    pub fn row(&self, y: u32) -> &[bool] {
+        let w = self.width as usize;
+        &self.dark[(y as usize) * w..(y as usize) * w + w]
     }
 
     /// Returns whether the pixel at `(x, y)` is dark. Out-of-bounds reads are
@@ -81,76 +114,339 @@ pub fn binarize(luma: &[u8], width: u32, height: u32, window_div: usize) -> Opti
     // Small images: adaptive windows are meaningless, use a global threshold.
     // Note this makes the retry pass a no-op for them — both passes land on the
     // same Otsu result — which is correct: there is no second opinion to have.
+    // `radius_invariant` is what tells the pipeline so.
     if width < 24 || height < 24 {
-        return Some(otsu(luma, width, height));
+        return Some(otsu(luma, width, height, true));
+    }
+
+    // A frame whose dynamic range is too narrow cannot produce a single dark
+    // pixel on the adaptive pass, and we can prove that from two bytes rather
+    // than from a full window evaluation per pixel. Skipping straight to the
+    // fallback here is what a blank camera frame used to pay an entire wasted
+    // adaptive pass for.
+    if !can_be_dark(luma) {
+        return Some(otsu(luma, width, height, true));
     }
 
     let bin = adaptive(luma, width, height, window_div);
 
-    // Guard against a degenerate all-one-colour result (e.g. flat gradient) by
-    // falling back to Otsu.
-    let dark_count = bin.dark.iter().filter(|&&d| d).count();
-    let total = w * h;
-    if dark_count == 0 || dark_count == total {
-        return Some(otsu(luma, width, height));
+    // Guard against a degenerate all-light result (e.g. a flat gradient with no
+    // local dip anywhere) by falling back to Otsu. `any` rather than a count:
+    // the only degenerate case reachable here is "no dark pixel at all", so a
+    // frame with content stops on its first dark pixel instead of walking the
+    // whole buffer.
+    //
+    // The mirror case — *every* pixel dark — cannot occur and is not tested for.
+    // Take the pixel holding the frame's maximum value `m`: every pixel in its
+    // window is at most `m`, so `sum <= count * m`, and its own test reads
+    // `m * count * 100 < sum * 88 <= count * m * 88`, which is false. The
+    // brightest pixel in a frame is never dark.
+    if !bin.dark.iter().any(|&d| d) {
+        return Some(otsu(luma, width, height, false));
     }
     Some(bin)
 }
 
-/// Bradley adaptive threshold using an integral image, with the window radius
-/// set to `1/window_div` of the smaller image side.
+/// Whether the adaptive pass could mark *any* pixel dark, decided from the
+/// frame's dynamic range alone.
+///
+/// A pixel is dark when `value * count * 100 < sum * 88`. Every pixel in a
+/// window is at most the frame maximum, so `sum <= count * max`; every `value`
+/// is at least the frame minimum. When `min * 100 >= max * 88` the test is
+/// therefore false at every pixel, and the adaptive pass is a guaranteed no-op.
+///
+/// The bound reads only the extremes, so it does not mention the window radius:
+/// a frame that fails it fails it at *every* radius. That is what makes the
+/// result [radius-invariant](Binary::is_radius_invariant) and lets the pipeline
+/// skip its retry pass on such frames.
+fn can_be_dark(luma: &[u8]) -> bool {
+    let (mut lo, mut hi) = (u8::MAX, u8::MIN);
+    for &p in luma {
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    u32::from(lo) * 100 < u32::from(hi) * 88
+}
+
+/// The integer width the window sums are accumulated at.
+///
+/// The adaptive pass is memory- and throughput-bound, and its threshold loop
+/// only vectorizes at a width the target has vector multiply for. `u32` is that
+/// width and covers every frame up to 4K; `u64` is the fallback for images too
+/// large to keep the products in 32 bits. Both instantiations run identical
+/// logic, so they agree bit for bit — pinned by
+/// [`tests::the_two_accumulator_widths_agree`].
+trait Acc: Copy + Ord + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> {
+    const ZERO: Self;
+    fn from_luma(v: u8) -> Self;
+    /// `n` is a pixel count or one of the two small Bradley constants. Callers
+    /// reach the `u32` instantiation only through [`fits_u32`], which is what
+    /// makes the narrowing conversion exact.
+    fn from_count(n: usize) -> Self;
+}
+
+impl Acc for u32 {
+    const ZERO: Self = 0;
+    #[inline]
+    fn from_luma(v: u8) -> Self {
+        Self::from(v)
+    }
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    fn from_count(n: usize) -> Self {
+        n as Self
+    }
+}
+
+impl Acc for u64 {
+    const ZERO: Self = 0;
+    #[inline]
+    fn from_luma(v: u8) -> Self {
+        Self::from(v)
+    }
+    #[inline]
+    fn from_count(n: usize) -> Self {
+        n as Self
+    }
+}
+
+/// Whether every product the `u32` accumulator has to hold fits in 32 bits.
+///
+/// Three quantities are bounded: the running row prefix, which reaches the whole
+/// frame's luma sum (`w * h * 255`); the scaled window sum (`count * 255 * 22`);
+/// and the pixel side of the comparison (`255 * count * 25`). The last binds.
+/// Written as divisions so the check itself cannot overflow.
+fn fits_u32(w: usize, h: usize, radius: usize) -> bool {
+    let side = 2 * radius + 1;
+    let count = side.min(w) * side.min(h);
+    let limit = u32::MAX as usize;
+    w * h <= limit / 255 && count <= limit / (255 * 25)
+}
+
+/// Bradley adaptive threshold, with the window radius set to `1/window_div` of
+/// the smaller image side.
 fn adaptive(luma: &[u8], width: u32, height: u32, window_div: usize) -> Binary {
     let (w, h) = (width as usize, height as usize);
+    // Window radius ~ 1/window_div of the smaller side, at least 4 px. Since
+    // `window_div >= 8` and the caller has ruled out sides below 24, the window
+    // is never wider than the frame: `2 * radius + 1 <= min(w, h)`.
+    let radius = (w.min(h) / window_div.max(1)).max(4);
 
-    // Integral image with a zero-padded first row/column: `integral[y*(w+1)+x]`
-    // is the sum of all pixels strictly above and to the left of `(x, y)`.
-    let stride = w + 1;
-    let mut integral = vec![0u64; stride * (h + 1)];
-    for y in 0..h {
-        let mut row_sum = 0u64;
-        for x in 0..w {
-            row_sum += luma[y * w + x] as u64;
-            integral[(y + 1) * stride + (x + 1)] = integral[y * stride + (x + 1)] + row_sum;
-        }
-    }
-
-    // Window radius ~ 1/window_div of the smaller side, at least 4 px.
-    let radius = (w.min(h) / window_div.max(1)).max(4) as i64;
-    // Bradley "t" parameter: a pixel is dark when it is >= 12% below the local
-    // mean.
-    let t_num: u64 = 88; // (100 - 12)
-    let t_den: u64 = 100;
-
-    let mut dark = vec![false; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let x0 = (x as i64 - radius).max(0) as usize;
-            let y0 = (y as i64 - radius).max(0) as usize;
-            let x1 = ((x as i64 + radius) as usize).min(w - 1);
-            let y1 = ((y as i64 + radius) as usize).min(h - 1);
-            let count = ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
-            let sum = integral[(y1 + 1) * stride + (x1 + 1)] + integral[y0 * stride + x0]
-                - integral[y0 * stride + (x1 + 1)]
-                - integral[(y1 + 1) * stride + x0];
-            let value = luma[y * w + x] as u64;
-            // dark if value*count < mean*count * t_num/t_den == sum * t_num/t_den
-            dark[y * w + x] = value * count * t_den < sum * t_num;
-        }
-    }
+    let dark = if fits_u32(w, h, radius) {
+        adaptive_at::<u32>(luma, w, h, radius)
+    } else {
+        adaptive_at::<u64>(luma, w, h, radius)
+    };
 
     Binary {
         width,
         height,
         dark,
+        radius_invariant: false,
     }
 }
 
-/// Global Otsu threshold. Pixels with value `<=` the threshold are dark.
-fn otsu(luma: &[u8], width: u32, height: u32) -> Binary {
-    let mut hist = [0u64; 256];
-    for &p in luma {
-        hist[p as usize] += 1;
+/// One row of luma folded into the per-column window sums.
+#[inline]
+fn add_row<A: Acc>(colsum: &mut [A], row: &[u8]) {
+    for (c, &p) in colsum.iter_mut().zip(row) {
+        *c = *c + A::from_luma(p);
     }
+}
+
+/// The inverse of [`add_row`], for the row leaving the window's top.
+#[inline]
+fn sub_row<A: Acc>(colsum: &mut [A], row: &[u8]) {
+    for (c, &p) in colsum.iter_mut().zip(row) {
+        *c = *c - A::from_luma(p);
+    }
+}
+
+/// Elements per block in [`prefix_sum`].
+const PREFIX_BLOCK: usize = 8;
+
+/// Prefix sum of `src` into `dst[1..]`, with `dst[0] = 0`.
+///
+/// Every other loop in the adaptive pass is a flat elementwise walk; this one
+/// carries a dependency, so at 1280 columns per row it is what sets the row's
+/// latency rather than its throughput. Blocking is what breaks that up: each
+/// block's internal prefix is computed from zero, so consecutive blocks are
+/// independent and the core can overlap them, and only the one add that folds
+/// the running carry into the next block stays on the critical path — one add
+/// per [`PREFIX_BLOCK`] elements instead of one per element.
+fn prefix_sum<A: Acc>(src: &[A], dst: &mut [A]) {
+    debug_assert_eq!(dst.len(), src.len() + 1);
+    dst[0] = A::ZERO;
+    let mut carry = A::ZERO;
+
+    let mut blocks = src.chunks_exact(PREFIX_BLOCK);
+    let mut out = dst[1..].chunks_exact_mut(PREFIX_BLOCK);
+    for (block, slot) in blocks.by_ref().zip(out.by_ref()) {
+        let mut local = [A::ZERO; PREFIX_BLOCK];
+        let mut acc = A::ZERO;
+        for (l, &s) in local.iter_mut().zip(block) {
+            acc = acc + s;
+            *l = acc;
+        }
+        for (d, &l) in slot.iter_mut().zip(local.iter()) {
+            *d = carry + l;
+        }
+        carry = carry + acc;
+    }
+
+    for (d, &s) in out.into_remainder().iter_mut().zip(blocks.remainder()) {
+        carry = carry + s;
+        *d = carry;
+    }
+}
+
+/// The adaptive threshold itself, at a chosen accumulator width.
+///
+/// No integral image. The window sum is separated into a vertical and a
+/// horizontal half: `colsum[x]` holds the sum of the window's rows in column
+/// `x` and is slid down the frame one row at a time (add the row entering the
+/// bottom, subtract the one leaving the top), then a prefix sum along `colsum`
+/// turns any horizontal span into one subtraction. State is two `w`-element
+/// buffers that stay in cache, instead of a `(w+1) * (h+1)` integral image —
+/// 7.4 MB of traffic per pass at 720p, which is what made this loop
+/// bandwidth-bound.
+///
+/// The payoff is in the shape as much as the size: the row slide, the prefix
+/// and the threshold comparison are each a flat walk over slices with no
+/// per-pixel bounds check and no data-dependent indexing, and the interior of
+/// every row — everywhere the window does not hit a frame edge — has a constant
+/// pixel `count`, so the comparison is a single loop over three slices that the
+/// backend can vectorize.
+fn adaptive_at<A: Acc>(luma: &[u8], w: usize, h: usize, radius: usize) -> Vec<bool> {
+    // The edge/interior split below assumes the window never spans the whole
+    // frame; callers guarantee it via the window_div >= 8 / min-side rules.
+    debug_assert!(
+        w > 2 * radius && h > 2 * radius,
+        "adaptive window ({radius}) must fit inside the frame ({w}x{h})"
+    );
+    let mut colsum = vec![A::ZERO; w];
+    let mut prefix = vec![A::ZERO; w + 1];
+    let mut dark = vec![false; w * h];
+
+    // Bradley "t" parameter: a pixel is dark when it is >= 12% below the local
+    // mean, i.e. `value * count * 100 < sum * 88`. Both sides are divided by
+    // four, which is exact and buys four bits of headroom in the accumulator.
+    let t_num = A::from_count(22); // 88 / 4
+    let t_den = A::from_count(25); // 100 / 4
+
+    // Rows currently folded into `colsum`, as a half-open range.
+    let (mut top, mut bottom) = (0usize, 0usize);
+
+    for y in 0..h {
+        let y0 = y.saturating_sub(radius);
+        let y1 = (y + radius).min(h - 1);
+        while bottom <= y1 {
+            add_row(&mut colsum, &luma[bottom * w..bottom * w + w]);
+            bottom += 1;
+        }
+        while top < y0 {
+            sub_row(&mut colsum, &luma[top * w..top * w + w]);
+            top += 1;
+        }
+        let rows = y1 - y0 + 1;
+
+        prefix_sum(&colsum, &mut prefix);
+
+        let lrow = &luma[y * w..y * w + w];
+        let drow = &mut dark[y * w..y * w + w];
+
+        // Interior: the window is fully inside the frame horizontally, so
+        // `count` is the same at every column and the whole span is one flat
+        // loop. `w >= 2 * radius + 1` (see `adaptive`), so this span is never
+        // empty and neither prefix slice underflows.
+        let (lo, hi) = (radius, w - radius);
+        let k = A::from_count(rows * (2 * radius + 1)) * t_den;
+        let (ahead, behind) = (&prefix[2 * radius + 1..=w], &prefix[..=w - 2 * radius - 1]);
+        for (d, (&v, (&a, &b))) in drow[lo..hi]
+            .iter_mut()
+            .zip(lrow[lo..hi].iter().zip(ahead.iter().zip(behind)))
+        {
+            *d = A::from_luma(v) * k < (a - b) * t_num;
+        }
+
+        // Edges: the window is clamped against a frame border, so `count` grows
+        // (left) or shrinks (right) by `rows` per column. Written as two flat
+        // loops with the clamp already resolved rather than one loop that
+        // re-derives the bounds per pixel — these are only `2 * radius` of the
+        // row's columns but they were costing as much as the whole interior.
+        let left_sums = &prefix[radius + 1..=2 * radius];
+        for (i, ((d, &v), &s)) in drow[..lo]
+            .iter_mut()
+            .zip(&lrow[..lo])
+            .zip(left_sums)
+            .enumerate()
+        {
+            // x = i, window is columns 0 ..= i + radius.
+            let count = A::from_count(rows * (i + radius + 1));
+            *d = A::from_luma(v) * count * t_den < s * t_num;
+        }
+
+        let total = prefix[w];
+        let right_sums = &prefix[w - 2 * radius..w - radius];
+        for (i, ((d, &v), &s)) in drow[hi..]
+            .iter_mut()
+            .zip(&lrow[hi..])
+            .zip(right_sums)
+            .enumerate()
+        {
+            // x = hi + i, window is columns x - radius ..= w - 1.
+            let count = A::from_count(rows * (2 * radius - i));
+            *d = A::from_luma(v) * count * t_den < (total - s) * t_num;
+        }
+    }
+
+    dark
+}
+
+/// Number of interleaved sub-histograms in [`histogram`].
+///
+/// A single `hist[p] += 1` is a load and a store to the same address whenever
+/// two neighbouring pixels share a value, so a flat or near-flat frame — the
+/// one that reaches Otsu most often — serialises the whole buffer on
+/// store-to-load forwarding latency. Independent tallies give the core that
+/// many chains to interleave, and the merge is one pass over 1024 counters.
+///
+/// Four, measured: on a uniform 720p frame the tally goes 1141 µs at one lane
+/// to 179 µs at four, and back up past eight as the lane arrays start costing
+/// more in cache and address arithmetic than the chains they break. A textured
+/// frame sits at ~180 µs throughout — it has no chain to break — so the choice
+/// is made entirely by the degenerate case, which is the one that reaches here.
+const HISTOGRAM_LANES: usize = 4;
+
+/// Luma histogram, tallied in [`HISTOGRAM_LANES`] independent lanes.
+fn histogram(luma: &[u8]) -> [u64; 256] {
+    let mut lanes = [[0u64; 256]; HISTOGRAM_LANES];
+    let mut chunks = luma.chunks_exact(HISTOGRAM_LANES);
+    for chunk in &mut chunks {
+        for (lane, &p) in lanes.iter_mut().zip(chunk) {
+            lane[p as usize] += 1;
+        }
+    }
+    for &p in chunks.remainder() {
+        lanes[0][p as usize] += 1;
+    }
+
+    let mut hist = [0u64; 256];
+    for lane in &lanes {
+        for (h, &c) in hist.iter_mut().zip(lane) {
+            *h += c;
+        }
+    }
+    hist
+}
+
+/// Global Otsu threshold. Pixels with value `<=` the threshold are dark.
+///
+/// `radius_invariant` records whether the caller reached this fallback for a
+/// reason that holds at every window radius — see
+/// [`Binary::is_radius_invariant`].
+fn otsu(luma: &[u8], width: u32, height: u32, radius_invariant: bool) -> Binary {
+    let hist = histogram(luma);
     let total = luma.len() as u64;
 
     let sum_total: u64 = hist.iter().enumerate().map(|(i, &c)| i as u64 * c).sum();
@@ -184,6 +480,7 @@ fn otsu(luma: &[u8], width: u32, height: u32) -> Binary {
         width,
         height,
         dark,
+        radius_invariant,
     }
 }
 
@@ -208,6 +505,79 @@ mod tests {
                 assert_eq!(b.get(x, y), x < 8, "pixel ({x},{y})");
             }
         }
+    }
+
+    #[test]
+    fn the_two_accumulator_widths_agree() {
+        // `adaptive` picks `u32` for anything up to 4K and `u64` beyond, and no
+        // fixture in this workspace is large enough to reach the wide path, so
+        // this is the only thing standing between it and silent rot. Both are
+        // driven over the same frame — a vignette with dense worn-print modules,
+        // which exercises the whole range of window sums — and compared bit for
+        // bit.
+        let (w, h) = (320usize, 240usize);
+        let mut luma = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x as f64 - 160.0, y as f64 - 120.0);
+                let fall = 1.0 - 0.6 * (dx * dx + dy * dy) / (160.0 * 160.0 + 120.0 * 120.0);
+                let module = (x / 3 + y / 3) % 3 == 0;
+                let refl = if module { 0.55 } else { 1.0 };
+                luma[y * w + x] = (255.0 * fall * refl).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        for radius in [4usize, 15, 30] {
+            let narrow = adaptive_at::<u32>(&luma, w, h, radius);
+            let wide = adaptive_at::<u64>(&luma, w, h, radius);
+            assert_eq!(narrow, wide, "widths disagree at radius {radius}");
+            // Guard the guard: a fixture that binarized to one flat colour would
+            // let two broken implementations agree.
+            assert!(narrow.iter().any(|&d| d) && narrow.iter().any(|&d| !d));
+        }
+    }
+
+    #[test]
+    fn a_frame_too_flat_to_threshold_is_settled_at_any_radius() {
+        // The pipeline skips its retry pass on these frames, and that is only
+        // sound if the two radii genuinely agree on them. Both halves are
+        // pinned: the flag the pipeline reads, and the output it is a claim
+        // about.
+        //
+        // 232 on 255 is a 9% spread — under the 12% Bradley needs — so it stands
+        // for the near-blank camera frame rather than only the perfectly uniform
+        // one, which any implementation would get right by accident.
+        let (w, h) = (96u32, 96u32);
+        for (label, fill) in [("uniform", 255u8), ("near-flat", 232)] {
+            let mut luma = vec![255u8; (w * h) as usize];
+            for (i, p) in luma.iter_mut().enumerate() {
+                if i % 3 == 0 {
+                    *p = fill;
+                }
+            }
+            let primary = binarize(&luma, w, h, PRIMARY_WINDOW_DIV).unwrap();
+            let retry = binarize(&luma, w, h, RETRY_WINDOW_DIV).unwrap();
+            assert!(
+                primary.is_radius_invariant() && retry.is_radius_invariant(),
+                "{label} frame must report itself settled"
+            );
+            assert_eq!(primary.dark, retry.dark, "{label} frame differs by radius");
+        }
+
+        // And the flag must not be set on a frame the radius does decide, or the
+        // pipeline would skip a retry that matters.
+        let side = 168u32;
+        let mut luma = vec![255u8; (side * side) as usize];
+        for y in 60..84 {
+            for x in 60..84 {
+                luma[(y * side + x) as usize] = 0;
+            }
+        }
+        assert!(
+            !binarize(&luma, side, side, PRIMARY_WINDOW_DIV)
+                .unwrap()
+                .is_radius_invariant(),
+            "a frame with real dark content must not be reported settled"
+        );
     }
 
     #[test]
@@ -421,5 +791,26 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fits_u32_tests {
+    use super::fits_u32;
+
+    /// Pins the accumulator-width routing at the boundaries the doc comment
+    /// argues from: 4K-class frames stay in u32, 8K-class frames do not.
+    #[test]
+    fn accumulator_routing_boundaries() {
+        // 3840x2160 with the /8 window fits u32.
+        assert!(fits_u32(3840, 2160, 2160 / 8));
+        // 7680x4320 blows the whole-frame prefix bound.
+        assert!(!fits_u32(7680, 4320, 4320 / 8));
+        // The frame-sum bound itself: w*h == floor(u32::MAX/255) passes, one
+        // row more fails (radius kept small so the count bound stays inert).
+        let limit = u32::MAX as usize / 255;
+        let w = 4096;
+        assert!(fits_u32(w, limit / w, 4));
+        assert!(!fits_u32(w, limit / w + 1, 4));
     }
 }
