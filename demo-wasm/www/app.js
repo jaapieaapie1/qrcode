@@ -302,7 +302,54 @@ window.addEventListener('resize', () => {
 // ---------------------------------------------------------------------------
 
 let downloadUrl = null;
+let downloadPngUrl = null;
 let genTimer = 0;
+
+const downloadPng = el('download-png');
+const copyPng = el('copy-png');
+
+/// Longest side of exported PNGs, in pixels. The SVG is crisp at any size;
+/// 1024 keeps the raster scannable without bloating the clipboard.
+const PNG_SIZE = 1024;
+
+/** Rasterizes the current SVG markup to a PNG blob via an offscreen canvas. */
+function svgToPngBlob(svg) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const canvas = document.createElement('canvas');
+      canvas.width = PNG_SIZE;
+      canvas.height = PNG_SIZE;
+      const ctx = canvas.getContext('2d');
+      // The renderer's quiet zone is part of the SVG, but a solid backdrop
+      // keeps the PNG readable on dark surfaces even if that ever changes.
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, PNG_SIZE, PNG_SIZE);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, 0, 0, PNG_SIZE, PNG_SIZE);
+      canvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error('PNG encode failed'))),
+        'image/png',
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('SVG rasterize failed'));
+    };
+    img.src = url;
+  });
+}
+
+function clearPngExports() {
+  downloadPng.hidden = true;
+  copyPng.hidden = true;
+  if (downloadPngUrl) {
+    URL.revokeObjectURL(downloadPngUrl);
+    downloadPngUrl = null;
+  }
+}
 
 /** Micro QR has no level H; only Micro QR has the M1 detection-only selection. */
 function syncEcOptions() {
@@ -327,6 +374,7 @@ async function regenerate() {
     genOut.hidden = false;
     genError.hidden = true;
     download.hidden = true;
+    clearPngExports();
     if (downloadUrl) {
       URL.revokeObjectURL(downloadUrl);
       downloadUrl = null;
@@ -342,6 +390,7 @@ async function regenerate() {
     genError.textContent = svg.slice('ERROR:'.length).trim();
     genError.hidden = false;
     download.hidden = true;
+    clearPngExports();
     if (downloadUrl) {
       URL.revokeObjectURL(downloadUrl);
       downloadUrl = null;
@@ -358,9 +407,45 @@ async function regenerate() {
   if (downloadUrl) URL.revokeObjectURL(downloadUrl);
   downloadUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
   download.href = downloadUrl;
-  download.download = genMicro.checked ? 'microqr.svg' : 'qrcode.svg';
+  const stem = genMicro.checked ? 'microqr' : 'qrcode';
+  download.download = `${stem}.svg`;
+
+  // PNG export: rasterized once per (debounced) regeneration. A stale result
+  // from a slow rasterize is guarded by comparing against the live SVG.
+  clearPngExports();
+  try {
+    const blob = await svgToPngBlob(svg);
+    if (genOut.innerHTML !== svg) return; // regenerated meanwhile
+    downloadPngUrl = URL.createObjectURL(blob);
+    downloadPng.href = downloadPngUrl;
+    downloadPng.download = `${stem}.png`;
+    downloadPng.hidden = false;
+    // Clipboard needs a secure context (https or localhost) and ClipboardItem.
+    if (navigator.clipboard && window.ClipboardItem) {
+      copyPng.hidden = false;
+      copyPng.dataset.svg = svg;
+    }
+  } catch {
+    // PNG export is a convenience; the SVG link above still works.
+  }
   download.hidden = false;
 }
+
+copyPng.addEventListener('click', async () => {
+  const svg = copyPng.dataset.svg;
+  if (!svg) return;
+  const original = 'Copy PNG';
+  try {
+    // Rasterize at click time: Safari requires the ClipboardItem promise to be
+    // created inside the user gesture, and a fresh blob avoids holding one.
+    const item = new ClipboardItem({ 'image/png': svgToPngBlob(svg) });
+    await navigator.clipboard.write([item]);
+    copyPng.textContent = 'Copied!';
+  } catch {
+    copyPng.textContent = 'Copy failed';
+  }
+  setTimeout(() => (copyPng.textContent = original), 1500);
+});
 
 function scheduleRegenerate() {
   clearTimeout(genTimer);
