@@ -116,6 +116,22 @@ jobs:
           test -f pkg/qr_demo.js
           test -f pkg/qr_demo_bg.wasm
           grep -q "./pkg/qr_demo.js" app.js
+      # Deploys the built demo to Cloudflare Pages on pushes to main, and only
+      # once the two secrets exist — until then the step is skipped and the job
+      # stays green. Setup (one time):
+      #   1. Cloudflare dashboard -> Workers & Pages -> create Pages project
+      #      named `qrcode-demo` (direct upload).
+      #   2. Repo settings -> secrets -> add CLOUDFLARE_API_TOKEN (Pages:Edit)
+      #      and CLOUDFLARE_ACCOUNT_ID.
+      - name: Deploy to Cloudflare Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.HAVE_CF_SECRETS == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy demo-wasm/www --project-name=qrcode-demo
+    env:
+      HAVE_CF_SECRETS: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
 
   esp32-emulation:
     name: ESP32-class execution (QEMU riscv32)
