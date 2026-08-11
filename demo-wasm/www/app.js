@@ -1,12 +1,16 @@
 // Browser glue for the qr-demo WebAssembly module.
 //
-// Scanning: a frame is drawn to an offscreen canvas, converted to an 8-bit
-// luma plane here (the wasm side takes raw luma so the demo needs no web-sys
-// binding), then handed to `scan`, which returns JSON.
+// Camera scanning: a frame is drawn to an offscreen canvas and its raw RGBA
+// handed to a `Scanner`, which is stateful across frames — it carries qr-video's
+// region-of-interest tracking, full-scan cadence and temporal de-duplication,
+// and returns first/repeat/lost events rather than a bare detection list. The
+// RGBA -> luma reduction happens inside wasm; see `Scanner.scan_frame_rgba`.
+// File scanning: one-shot, so it uses the stateless `scan`, which also reports
+// the symbol version the streaming path cannot.
 // Generating: `generate` returns an SVG document string, or a message starting
 // with "ERROR:".
 
-import init, { scan, generate } from './pkg/qr_demo.js';
+import init, { scan, generate, Scanner } from './pkg/qr_demo.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -27,13 +31,20 @@ const genOut = el('gen-out');
 const genError = el('gen-error');
 const download = el('download');
 
-// Longest edge the detector sees. Full-resolution camera frames buy no
-// accuracy at these module sizes and cost the whole frame budget.
-const MAX_EDGE = 720;
-// ~10 scans per second; the rAF loop simply skips frames in between.
-const SCAN_INTERVAL_MS = 100;
+// Longest edge the detector sees. More pixels per module is the single biggest
+// low-light win — sensor noise averages out over a larger module area — and the
+// detector is fast enough to afford it: ~1.5 ms on a 1080p frame.
+const MAX_EDGE = 1440;
+// ~15 scans per second; the rAF loop simply skips frames in between.
+const SCAN_INTERVAL_MS = 66;
 // How many distinct payloads to keep in the decoded list.
 const MAX_RESULTS = 8;
+// How long an overlay box survives without a fresh sighting. The Micro QR pass
+// runs on a slower cadence than the QR one and an ROI scan can miss a frame, so
+// clearing the overlay on every frame with no event would make the box blink.
+const OVERLAY_TTL_MS = 300;
+// Frames kept for the rolling median scan time in the status line.
+const TIMING_WINDOW = 20;
 
 const work = document.createElement('canvas');
 const workCtx = work.getContext('2d', { willReadFrequently: true });
@@ -42,6 +53,12 @@ const overlayCtx = overlay.getContext('2d');
 let stream = null;
 let rafId = 0;
 let lastScan = 0;
+let scanner = null;
+/** Payload key -> latest sighting, for the overlay. Camera path only. */
+const live = new Map();
+/** Recent wasm scan durations, milliseconds. */
+const timings = [];
+let frameSize = null;
 const seen = new Map();
 
 // ---------------------------------------------------------------------------
@@ -65,8 +82,12 @@ function setStatus(msg, isError = false) {
   scanStatus.classList.toggle('error', isError);
 }
 
-/** Draws `source` into the work canvas at a bounded size and returns its luma plane. */
-function toLuma(source, sw, sh) {
+/**
+ * Draws `source` into the work canvas, bounded to `MAX_EDGE` on its longer
+ * side, and returns the raw RGBA plane. The grayscale reduction is left to
+ * wasm — it is roughly twice as fast there, even counting the wider copy.
+ */
+function grabFrame(source, sw, sh) {
   const factor = Math.min(1, MAX_EDGE / Math.max(sw, sh));
   const w = Math.max(1, Math.round(sw * factor));
   const h = Math.max(1, Math.round(sh * factor));
@@ -76,12 +97,28 @@ function toLuma(source, sw, sh) {
   }
   workCtx.drawImage(source, 0, 0, w, h);
   const { data } = workCtx.getImageData(0, 0, w, h);
-  const luma = new Uint8Array(w * h);
-  for (let i = 0, p = 0; i < luma.length; i++, p += 4) {
-    // Integer approximation of 0.299R + 0.587G + 0.114B.
-    luma[i] = (77 * data[p] + 150 * data[p + 1] + 29 * data[p + 2]) >> 8;
-  }
-  return { luma, w, h };
+  // getImageData hands back a Uint8ClampedArray; wasm-bindgen wants Uint8Array
+  // over the same buffer, which is a view, not a copy.
+  return { rgba: new Uint8Array(data.buffer, data.byteOffset, data.length), w, h };
+}
+
+/** Median of a short unsorted array of numbers; 0 when empty. */
+function median(values) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[sorted.length >> 1];
+}
+
+function recordTiming(ms) {
+  timings.push(ms);
+  if (timings.length > TIMING_WINDOW) timings.shift();
+}
+
+/** `1440×810 · 3.1 ms` — the two numbers that explain a bad scanning session. */
+function perfSuffix() {
+  if (!frameSize) return '';
+  const ms = median(timings);
+  return ` — ${frameSize.w}×${frameSize.h}, ${ms.toFixed(1)} ms/scan`;
 }
 
 /**
@@ -104,16 +141,16 @@ function overlayMapper(sw, sh) {
   return (x, y) => [ox + (x / sw) * dw, oy + (y / sh) * dh];
 }
 
-function drawOverlay(detections, sw, sh) {
+/** `boxes` are `{ corners, kind, version, unreadable }` in detector pixels. */
+function drawOverlay(boxes, sw, sh) {
   const map = overlayMapper(sw, sh);
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   overlayCtx.lineWidth = 3;
   overlayCtx.lineJoin = 'round';
   overlayCtx.font = '13px system-ui, sans-serif';
 
-  for (const d of detections) {
-    const decoded = d.error === null;
-    overlayCtx.strokeStyle = decoded ? '#39d98a' : '#ffb020';
+  for (const d of boxes) {
+    overlayCtx.strokeStyle = d.unreadable ? '#ffb020' : '#39d98a';
     overlayCtx.fillStyle = overlayCtx.strokeStyle;
 
     overlayCtx.beginPath();
@@ -126,23 +163,30 @@ function drawOverlay(detections, sw, sh) {
     overlayCtx.stroke();
 
     const [lx, ly] = map(d.corners[0][0], d.corners[0][1]);
-    const label = d.kind === 'micro'
-      ? `Micro${d.version ? ' M' + d.version : ''}`
-      : `QR${d.version ? ' v' + d.version : ''}`;
-    overlayCtx.fillText(decoded ? label : `${label} — unreadable`, lx, Math.max(12, ly - 6));
+    const label = symbolLabel(d);
+    overlayCtx.fillText(d.unreadable ? `${label} — unreadable` : label, lx, Math.max(12, ly - 6));
   }
 }
 
 /**
- * Folds decoded payloads into the distinct-results list. A symbol held in
- * front of the camera decodes ten times a second; only its first sighting and
- * a once-a-second timestamp refresh are worth a re-render.
+ * "QR v7" / "Micro M2" / plain "QR" when the version is unknown. The streaming
+ * path has no version to report: qr-video's observations carry the payload but
+ * not the symbol geometry.
  */
-function recordResults(detections) {
+function symbolLabel(d) {
+  if (d.kind === 'micro') return d.version ? `Micro M${d.version}` : 'Micro';
+  return d.version ? `QR v${d.version}` : 'QR';
+}
+
+/**
+ * Folds decoded payloads into the distinct-results list. Entries are
+ * `{ kind, version, text, bytes_hex }`; a payload already listed only refreshes
+ * its timestamp, and only once a second, to keep re-renders off the hot path.
+ */
+function recordResults(entries) {
   const now = Date.now();
   let changed = false;
-  for (const d of detections) {
-    if (d.error !== null) continue;
+  for (const d of entries) {
     const key = `${d.kind}:${d.text ?? d.bytes_hex}`;
     const existing = seen.get(key);
     if (!existing) {
@@ -181,7 +225,7 @@ function renderResults() {
     meta.className = 'meta';
     const tag = document.createElement('span');
     tag.className = 'tag';
-    tag.textContent = e.kind === 'micro' ? `Micro M${e.version ?? '?'}` : `QR v${e.version ?? '?'}`;
+    tag.textContent = symbolLabel(e);
     const time = document.createElement('span');
     time.textContent = new Date(e.at).toLocaleTimeString();
     meta.append(tag, time);
@@ -195,24 +239,46 @@ function renderResults() {
   }
 }
 
-async function runScan(source, sw, sh) {
-  if (!(await ready)) return;
-  const { luma, w, h } = toLuma(source, sw, sh);
-  let detections;
-  try {
-    detections = JSON.parse(scan(luma, w, h));
-  } catch (err) {
-    setStatus(`Scan failed: ${err}`, true);
-    return;
+/**
+ * Folds one frame's events into the overlay map. `first` is a payload the
+ * detector had not been tracking, and the only kind worth listing; `repeat`
+ * only refreshes the box; `lost` retires it. Boxes not refreshed within
+ * `OVERLAY_TTL_MS` are dropped, which covers the frames a symbol is simply not
+ * reported on.
+ */
+function applyEvents(events, now) {
+  const fresh = [];
+  for (const e of events) {
+    // Keys are qualified by symbology: a QR and a Micro carrying the same
+    // payload hash to the same key, and one's `lost` must not retire the
+    // other's box.
+    const boxKey = `${e.kind}:${e.key}`;
+    if (e.event === 'lost') {
+      live.delete(boxKey);
+      continue;
+    }
+    live.set(boxKey, {
+      kind: e.kind,
+      version: e.version,
+      corners: e.corners,
+      unreadable: e.unreadable,
+      at: now,
+    });
+    if (e.event === 'first' && !e.unreadable) fresh.push(e);
   }
-  drawOverlay(detections, w, h);
-  recordResults(detections);
+  for (const [key, box] of live) {
+    if (now - box.at > OVERLAY_TTL_MS) live.delete(key);
+  }
+  if (fresh.length > 0) recordResults(fresh);
+}
 
-  const unreadable = detections.filter((d) => d.error !== null).length;
-  const decoded = detections.length - unreadable;
-  if (detections.length === 0) setStatus('No symbol in frame.');
-  else if (unreadable === 0) setStatus(`${decoded} symbol${decoded === 1 ? '' : 's'} decoded.`);
-  else setStatus(`${decoded} decoded, ${unreadable} found but unreadable — move closer or steady the camera.`);
+function cameraStatus() {
+  const boxes = [...live.values()];
+  if (boxes.length === 0) return 'No symbol in frame.';
+  const unreadable = boxes.filter((b) => b.unreadable).length;
+  const decoded = boxes.length - unreadable;
+  if (unreadable === 0) return `${decoded} symbol${decoded === 1 ? '' : 's'} in view.`;
+  return `${decoded} decoded, ${unreadable} found but unreadable — move closer, hold steady, or add light.`;
 }
 
 function loop(now) {
@@ -220,7 +286,45 @@ function loop(now) {
   if (now - lastScan < SCAN_INTERVAL_MS) return;
   lastScan = now;
   if (video.readyState < 2 || video.videoWidth === 0) return;
-  runScan(video, video.videoWidth, video.videoHeight);
+
+  const { rgba, w, h } = grabFrame(video, video.videoWidth, video.videoHeight);
+  frameSize = { w, h };
+
+  let events;
+  const started = performance.now();
+  try {
+    events = JSON.parse(scanner.scan_frame_rgba(rgba, w, h, now));
+  } catch (err) {
+    // A throw here is the wasm module failing, not a bad frame; scanning on
+    // would repeat the same failure fifteen times a second.
+    stopCamera();
+    setStatus(`Scanning stopped — the detector failed: ${err}`, true);
+    return;
+  }
+  recordTiming(performance.now() - started);
+
+  applyEvents(events, now);
+  drawOverlay([...live.values()], w, h);
+  setStatus(cameraStatus() + perfSuffix());
+}
+
+/**
+ * Asks the track for continuous autofocus and auto-exposure. Both are optional
+ * MediaTrackCapabilities, absent on desktop browsers and on Safari; a camera
+ * that does not advertise them is left on its defaults.
+ */
+async function tuneTrack(track) {
+  const caps = track.getCapabilities?.();
+  if (!caps) return;
+  const advanced = [];
+  if (caps.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' });
+  if (caps.exposureMode?.includes('continuous')) advanced.push({ exposureMode: 'continuous' });
+  if (advanced.length === 0) return;
+  try {
+    await track.applyConstraints({ advanced });
+  } catch {
+    // Purely an enhancement — a rejected constraint set costs nothing.
+  }
 }
 
 async function startCamera() {
@@ -228,15 +332,26 @@ async function startCamera() {
     setStatus('This browser exposes no camera API. Use the image file input instead.', true);
     return;
   }
+  if (!(await ready)) return;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+      // 1080p ideal: the detector has budget for it and the extra pixels per
+      // module are what carry a symbol through poor light. `ideal` so a camera
+      // that cannot do it still opens at whatever it has.
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
       audio: false,
     });
   } catch (err) {
     setStatus(`Camera unavailable: ${err.name === 'NotAllowedError' ? 'permission denied' : err.message}. The page must be served from localhost or over HTTPS.`, true);
     return;
   }
+  const [track] = stream.getVideoTracks();
+  if (track) await tuneTrack(track);
+
   preview.hidden = true;
   video.hidden = false;
   stageHint.hidden = true;
@@ -244,6 +359,12 @@ async function startCamera() {
   await video.play();
   startCam.disabled = true;
   stopCam.disabled = false;
+
+  scanner ??= new Scanner();
+  scanner.reset();
+  live.clear();
+  timings.length = 0;
+  frameSize = null;
   setStatus('Scanning…');
   lastScan = 0;
   rafId = requestAnimationFrame(loop);
@@ -261,8 +382,60 @@ function stopCamera() {
   startCam.disabled = false;
   stopCam.disabled = true;
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+  live.clear();
+  scanner?.reset();
   if (preview.hidden) stageHint.hidden = false;
   setStatus('Camera stopped.');
+}
+
+/**
+ * RGBA to luma for the one-shot file path, which goes through the stateless
+ * `scan`. Doing it here rather than adding a second wasm entry point keeps the
+ * exported surface to the shape the camera actually uses; this runs once per
+ * picked file, so its cost is irrelevant.
+ */
+function rgbaToLuma(rgba) {
+  const luma = new Uint8Array(rgba.length / 4);
+  for (let i = 0, p = 0; i < luma.length; i++, p += 4) {
+    // Integer approximation of 0.299R + 0.587G + 0.114B.
+    luma[i] = (77 * rgba[p] + 150 * rgba[p + 1] + 29 * rgba[p + 2]) >> 8;
+  }
+  return luma;
+}
+
+async function runFileScan(source, sw, sh) {
+  if (!(await ready)) return;
+  const { rgba, w, h } = grabFrame(source, sw, sh);
+  frameSize = { w, h };
+  timings.length = 0;
+
+  let detections;
+  const started = performance.now();
+  try {
+    detections = JSON.parse(scan(rgbaToLuma(rgba), w, h));
+  } catch (err) {
+    setStatus(`Scan failed: ${err}`, true);
+    return;
+  }
+  recordTiming(performance.now() - started);
+
+  drawOverlay(
+    detections.map((d) => ({
+      kind: d.kind,
+      version: d.version,
+      corners: d.corners,
+      unreadable: d.error !== null,
+    })),
+    w,
+    h,
+  );
+  recordResults(detections.filter((d) => d.error === null));
+
+  const unreadable = detections.filter((d) => d.error !== null).length;
+  const decoded = detections.length - unreadable;
+  if (detections.length === 0) setStatus(`No symbol found.${perfSuffix()}`);
+  else if (unreadable === 0) setStatus(`${decoded} symbol${decoded === 1 ? '' : 's'} decoded.${perfSuffix()}`);
+  else setStatus(`${decoded} decoded, ${unreadable} found but unreadable.${perfSuffix()}`);
 }
 
 function scanFile(file) {
@@ -277,7 +450,7 @@ function scanFile(file) {
     stageHint.hidden = true;
     URL.revokeObjectURL(url);
     // Let layout settle so the overlay picks up the preview's final box.
-    requestAnimationFrame(() => runScan(preview, preview.width, preview.height));
+    requestAnimationFrame(() => runFileScan(preview, preview.width, preview.height));
   };
   img.onerror = () => {
     URL.revokeObjectURL(url);

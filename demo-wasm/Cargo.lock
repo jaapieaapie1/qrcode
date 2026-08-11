@@ -169,6 +169,7 @@ dependencies = [
  "qr-detect",
  "qr-encode",
  "qr-render",
+ "qr-video",
  "wasm-bindgen",
 ]
 
@@ -194,6 +195,14 @@ version = "0.1.0"
 dependencies = [
  "image",
  "qr-core",
+]
+
+[[package]]
+name = "qr-video"
+version = "0.1.0"
+dependencies = [
+ "qr-core",
+ "qr-detect",
 ]
 
 [[package]]
