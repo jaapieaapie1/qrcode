@@ -487,34 +487,307 @@ fn awkward_angles() {
 // Perspective
 // ---------------------------------------------------------------------------
 
-/// Warps a rendered symbol by pulling its top edge in by `shrink` of the image
-/// width on each side (a symbol tilted away from the camera).
-fn tilted(version: MicroVersion, scale: u32, shrink: f64) -> (Gray, BitMatrix) {
-    let m = micro_fixture(version, 0, 1234);
-    let g = pad(&render(&m, scale, 4), scale * 2);
-    let (w, h) = (g.w as f64 - 1.0, g.h as f64 - 1.0);
-    let dst = [
-        (w * shrink, 0.0),
-        (w * (1.0 - shrink), 0.0),
-        (w, h),
-        (0.0, h),
-    ];
-    (perspective(&g, dst, g.w, g.h), m)
+/// Which edge of the image a keystone warp pulls in.
+///
+/// All four are tested, and they are not equivalent: a micro symbol's finder is
+/// at one corner, so the two edges that touch it are measured directly while the
+/// two opposite ones are inferred, and a tilt that compresses the far edges is
+/// the harder case. `Diagonal` tilts about a corner, which foreshortens both
+/// axes at once.
+#[derive(Clone, Copy, Debug)]
+enum Tilt {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Diagonal,
 }
 
+impl Tilt {
+    const ALL: [Tilt; 5] = [
+        Tilt::Top,
+        Tilt::Bottom,
+        Tilt::Left,
+        Tilt::Right,
+        Tilt::Diagonal,
+    ];
+}
+
+/// Warps `g` by pulling one edge in by `shrink` of the image's span on each
+/// side — a symbol tilted away from the camera about the opposite edge.
+fn keystone(g: &Gray, shrink: f64, tilt: Tilt) -> Gray {
+    let (w, h) = (g.w as f64 - 1.0, g.h as f64 - 1.0);
+    let dst = match tilt {
+        Tilt::Top => [
+            (w * shrink, 0.0),
+            (w * (1.0 - shrink), 0.0),
+            (w, h),
+            (0.0, h),
+        ],
+        Tilt::Bottom => [
+            (0.0, 0.0),
+            (w, 0.0),
+            (w * (1.0 - shrink), h),
+            (w * shrink, h),
+        ],
+        Tilt::Left => [
+            (0.0, h * shrink),
+            (w, 0.0),
+            (w, h),
+            (0.0, h * (1.0 - shrink)),
+        ],
+        Tilt::Right => [
+            (0.0, 0.0),
+            (w, h * shrink),
+            (w, h * (1.0 - shrink)),
+            (0.0, h),
+        ],
+        Tilt::Diagonal => [
+            (w * shrink, h * shrink),
+            (w * (1.0 - shrink), 0.0),
+            (w, h),
+            (0.0, h * (1.0 - shrink)),
+        ],
+    };
+    perspective(g, dst, g.w, g.h)
+}
+
+/// Renders `version` and returns it keystoned by `shrink` about `tilt`.
+fn tilted(version: MicroVersion, scale: u32, shrink: f64, tilt: Tilt) -> (Gray, BitMatrix) {
+    let m = micro_fixture(version, 0, 1234);
+    let g = pad(&render(&m, scale, 4), scale * 2);
+    (keystone(&g, shrink, tilt), m)
+}
+
+/// The 40 fixtures the envelope is pinned over: every version, two module sizes
+/// and all five tilt directions.
+fn envelope_matrix(shrink: f64) -> impl Iterator<Item = (String, Gray, BitMatrix)> {
+    MicroVersion::ALL.into_iter().flat_map(move |version| {
+        [8u32, 12].into_iter().flat_map(move |scale| {
+            Tilt::ALL.into_iter().map(move |tilt| {
+                let (g, m) = tilted(version, scale, shrink, tilt);
+                (format!("{version:?} at {scale} px, {tilt:?}"), g, m)
+            })
+        })
+    })
+}
+
+/// The documented perspective envelope, measured rather than assumed.
+///
+/// A micro symbol has no alignment pattern, so three of its four corners are all
+/// that can be measured directly; the fourth used to be the parallelogram
+/// completion, which capped this at a 4% keystone. It is now searched for — see
+/// `micro::refine_bottom_right` — and the envelope moves accordingly. Measured
+/// over 120 configurations — four versions x three module sizes (8, 12, 20 px)
+/// x masks 0 and 2 x five tilt directions, every one of them
+/// `micro_fixture(version, mask, 1234)` — exact recovery goes from
+///
+/// | keystone | before | after |
+/// |----------|--------|-------|
+/// |       2% |  116   |  120  |
+/// |       4% |   93   |  120  |
+/// |       5% |   62   |  120  |
+/// |       8% |   20   |  117  |
+/// |      10% |   14   |  111  |
+/// |      12% |    1   |  104  |
+/// |      15% |    0   |   49  |
+///
+/// This test pins the 40-configuration subset at two module sizes, which runs in
+/// a couple of seconds: everything exact to 5%, and a floor on how much of the
+/// matrix survives at 10% and 12%. The floors are stated as counts rather than
+/// as "all of them" because the far edge of the envelope is genuinely ragged —
+/// which configuration falls over first depends on where module centres land —
+/// and pinning individual cases there would be pinning noise.
 #[test]
-fn mild_perspective() {
-    // A micro symbol has no alignment pattern, so there is no fourth
-    // independent measurement and the grid map is affine. All the tolerance for
-    // perspective therefore comes from the half-module margin around each
-    // sampled module centre — a 17-module symbol has far less of it than a
-    // 177-module QR symbol has with its alignment refinement. This is the
-    // documented envelope: a tilt that pulls the top edge in by 4% of the
-    // symbol width is recovered exactly.
-    for version in MicroVersion::ALL {
-        let (g, m) = tilted(version, 12, 0.04);
-        assert!(recovers(&g, &m), "{version:?} under a 4% tilt");
+fn perspective_envelope() {
+    for shrink in [0.0, 0.02, 0.04, 0.05] {
+        for (label, g, m) in envelope_matrix(shrink) {
+            assert!(
+                recovers(&g, &m),
+                "{label} under a {}% keystone was not recovered exactly",
+                shrink * 100.0
+            );
+        }
     }
+
+    for (shrink, floor) in [(0.10, 33), (0.12, 30)] {
+        let mut ok = 0;
+        let mut total = 0;
+        for (_, g, m) in envelope_matrix(shrink) {
+            total += 1;
+            ok += u32::from(recovers(&g, &m));
+        }
+        assert!(
+            ok >= floor,
+            "only {ok} of {total} configurations survived a {}% keystone (floor {floor})",
+            shrink * 100.0
+        );
+    }
+}
+
+/// Projects `g` as a plane rotated by `degrees` about an axis through its
+/// centre, seen by a pinhole camera `distance` pixels away.
+///
+/// `axis_degrees` orients the tilt axis in the image plane: 0 tilts about the
+/// horizontal, 90 about the vertical, 45 about a diagonal. The focal length is
+/// the camera distance, so the centre of the image keeps its scale and all that
+/// is left is the keystone.
+///
+/// The distance is in pixels, not in image widths, because what a tilt does to a
+/// symbol depends on how large that symbol is *relative to the camera distance*
+/// and on nothing else. A degrees figure on its own says very little: the same
+/// 15 degree tilt is a 6% keystone across a symbol two of its own spans from the
+/// lens and under 2% across one six spans away. Callers pass a multiple of the
+/// symbol's span, which is the ratio a person holding a phone actually controls.
+fn tilt_3d(g: &Gray, degrees: f64, d: f64, axis_degrees: f64) -> Gray {
+    let (w, h) = (g.w as f64 - 1.0, g.h as f64 - 1.0);
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    let (sa, ca) = axis_degrees.to_radians().sin_cos();
+    let (st, ct) = degrees.to_radians().sin_cos();
+    let project = |x: f64, y: f64| {
+        let (px, py) = (x - cx, y - cy);
+        // Split into components along and across the tilt axis; only the second
+        // leaves the image plane.
+        let along = px * ca + py * sa;
+        let across = -px * sa + py * ca;
+        let (tilted, z) = (across * ct, across * st);
+        let k = d / (d + z);
+        (
+            cx + (along * ca - tilted * sa) * k,
+            cy + (along * sa + tilted * ca) * k,
+        )
+    };
+    let dst = [
+        project(0.0, 0.0),
+        project(w, 0.0),
+        project(w, h),
+        project(0.0, h),
+    ];
+    perspective(g, dst, g.w, g.h)
+}
+
+/// `12345` as an M1-Detection symbol, mask 0.
+///
+/// Lifted verbatim from `tests-integration/tests/micro_golden.rs`, where it is a
+/// **segno 1.6.6** vector. M1 is the version the Project Owner's phone was
+/// looking at, and unlike `micro_fixture` this one actually decodes, which is
+/// what the scenario below has to assert: a detection that samples a wrong grid
+/// is not a detection, it is a wrong answer waiting to be reported.
+const M1_GOLDEN_12345: &[&str] = &[
+    "11111110101",
+    "10000010110",
+    "10111010000",
+    "10111010101",
+    "10111010010",
+    "10000010010",
+    "11111110000",
+    "00000000111",
+    "11000100011",
+    "01111011001",
+    "10111001010",
+];
+
+fn golden_m1() -> BitMatrix {
+    let mut m = BitMatrix::new(11);
+    for (y, row) in M1_GOLDEN_12345.iter().enumerate() {
+        for (x, c) in row.bytes().enumerate() {
+            m.set(x as u32, y as u32, c == b'1');
+        }
+    }
+    m
+}
+
+/// The Project Owner's report, approximated: an M1 on a bright rectangle inside
+/// a larger, dimmer frame, photographed off-axis.
+///
+/// This is the scenario the whole step exists for. The symbol was located —
+/// corners drawn, "found but unreadable" — and never decoded, while a full QR
+/// symbol at the same angle did, because the QR path solves a homography from
+/// three finders and the micro path was completing a parallelogram.
+///
+/// The tilt is a real pinhole projection rather than a hand-picked quad, swept
+/// over angle, tilt axis and camera distance. Distances are in spans of the
+/// symbol itself: 2 is a close macro shot, 6 is a phone held at a comfortable
+/// arm's length from a small label. Measured on the pre-refinement detector,
+/// this fixture fails from 10 degrees at 2 spans and from 15 at 4, which is
+/// exactly the report.
+///
+/// The floor at 25 degrees is a count rather than "all of them" for the same
+/// reason as in `perspective_envelope`: past the middle of the envelope which
+/// combination falls over first is a question about where module centres land.
+#[cfg(feature = "decode")]
+#[test]
+fn a_micro_symbol_on_a_screen_photographed_off_axis_decodes() {
+    for degrees in [10.0f64, 15.0] {
+        for (label, g) in off_axis_scenes(degrees) {
+            let dets = detect_micro_luma(&g.px, g.w, g.h);
+            assert_eq!(dets.len(), 1, "{label}: expected one micro detection");
+            let decoded = dets[0]
+                .decoded
+                .as_ref()
+                .unwrap_or_else(|| panic!("{label}: located but not decoded"));
+            assert_eq!(decoded.bytes, b"12345", "{label}: payload");
+        }
+    }
+
+    let (mut ok, mut total) = (0, 0);
+    for (_, g) in off_axis_scenes(25.0) {
+        total += 1;
+        let dets = detect_micro_luma(&g.px, g.w, g.h);
+        ok += u32::from(dets.len() == 1 && dets[0].decoded.is_some());
+    }
+    assert!(
+        ok >= 14,
+        "only {ok} of {total} scenes decoded at 25 degrees"
+    );
+}
+
+/// The same scenario without `decode`, where the assertion has to be on the
+/// sampled grid instead. Same scenes, same bar: every module.
+#[cfg(not(feature = "decode"))]
+#[test]
+fn a_micro_symbol_on_a_screen_photographed_off_axis_is_sampled_exactly() {
+    let m = golden_m1();
+    for degrees in [10.0f64, 15.0] {
+        for (label, g) in off_axis_scenes(degrees) {
+            assert_micro_recovers(&g, &m, &label);
+        }
+    }
+
+    let (mut ok, mut total) = (0, 0);
+    for (_, g) in off_axis_scenes(25.0) {
+        total += 1;
+        ok += u32::from(recovers(&g, &m));
+    }
+    assert!(
+        ok >= 14,
+        "only {ok} of {total} scenes recovered at 25 degrees"
+    );
+}
+
+/// The 16 scenes the off-axis scenario is measured over: four camera distances,
+/// in spans of the symbol, and four tilt axes.
+fn off_axis_scenes(degrees: f64) -> Vec<(String, Gray)> {
+    const SCALE: u32 = 9;
+    let m = golden_m1();
+    let span = (m.size() * SCALE) as f64;
+    let mut out = Vec::new();
+    for spans in [2.0f64, 3.0, 4.0, 6.0] {
+        for axis in [0.0f64, 45.0, 90.0, 135.0] {
+            // A dim room (luma 150) with a bright rectangle in it — the screen —
+            // carrying the symbol well inside its own quiet zone.
+            let symbol = render(&m, SCALE, 4);
+            let mut screen = Gray::new(symbol.w + 120, symbol.h + 80, 255);
+            screen.blit(&symbol, 60, 40);
+            let mut frame = Gray::new(640, 480, 150);
+            frame.blit(&screen, (640 - screen.w) / 2, (480 - screen.h) / 2);
+            out.push((
+                format!("{degrees} degrees about a {axis} degree axis, {spans} spans away"),
+                tilt_3d(&frame, degrees, spans * span, axis),
+            ));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +859,99 @@ fn finder_with_broken_timing_is_rejected() {
         detect_micro_luma(&g.px, g.w, g.h).is_empty(),
         "a symbol with no horizontal timing pattern must be rejected"
     );
+}
+
+/// The rejections above, under the tilts the refinement exists to handle.
+///
+/// This is the risk the refinement introduces and the reason it is gated the way
+/// it is. It has two free parameters and two searches, one of which scores
+/// candidates on the image itself without knowing what the symbol should
+/// contain; left to itself it will happily find *a* grid for anything
+/// finder-shaped. What stops it is that nothing it produces is adopted until it
+/// has passed the same function-pattern budget as before, plus a quiet-zone
+/// check that the affine map never needed — see `micro::quiet_zone_dark`.
+///
+/// Four hand-built negatives, each under five keystones in each of five
+/// directions — 25 warps per fixture, 100 in all. A phantom that only appears
+/// under one of them is still a phantom.
+#[test]
+fn tilting_does_not_resurrect_a_rejected_candidate() {
+    // A bare finder: nothing beyond the separator but quiet zone.
+    let mut bare = BitMatrix::new(11);
+    for y in 0..7 {
+        for x in 0..7 {
+            let border = x == 0 || x == 6 || y == 0 || y == 6;
+            let core = (2..=4).contains(&x) && (2..=4).contains(&y);
+            bare.set(x, y, border || core);
+        }
+    }
+
+    // A real micro symbol with its horizontal timing pattern filled in solid.
+    let mut broken = micro_fixture(MicroVersion::M3, 0, 31337);
+    for k in 8..broken.size() {
+        broken.set(k, 0, true);
+    }
+
+    // The nested-triple phantom: a finder pattern whose own dark ring reads as a
+    // second, larger `1:1:3:1:1` run. The QR path rejects it as a triple; the
+    // micro path must not adopt it either.
+    let mut nested = BitMatrix::new(15);
+    for y in 0..11 {
+        for x in 0..11 {
+            let outer = x == 0 || x == 10 || y == 0 || y == 10;
+            let ring = (2..=8).contains(&x)
+                && (2..=8).contains(&y)
+                && (x == 2 || x == 8 || y == 2 || y == 8);
+            let core = (4..=6).contains(&x) && (4..=6).contains(&y);
+            nested.set(x, y, outer || ring || core);
+        }
+    }
+
+    let cases: [(&str, Gray); 4] = [
+        ("bare finder", pad(&render(&bare, 10, 6), 40)),
+        ("broken timing", pad(&render(&broken, 10, 4), 40)),
+        ("nested triple", pad(&render(&nested, 10, 6), 40)),
+        ("noise", {
+            let mut g = Gray::new(320, 320, 255);
+            add_noise(&mut g, 120);
+            g
+        }),
+    ];
+
+    for (label, base) in cases {
+        for tilt in Tilt::ALL {
+            for shrink in [0.0, 0.05, 0.10, 0.15, 0.20] {
+                let g = keystone(&base, shrink, tilt);
+                assert!(
+                    detect_micro_luma(&g.px, g.w, g.h).is_empty(),
+                    "{label} at a {}% keystone about {tilt:?} was reported as a micro symbol",
+                    shrink * 100.0
+                );
+            }
+        }
+    }
+}
+
+/// A QR symbol under tilt must not shed phantom micro symbols either. Its three
+/// finders are consumed by the triple, but a triple that the grouping rejects
+/// under a steep tilt would release them again.
+#[test]
+fn a_tilted_qr_symbol_yields_no_micro() {
+    for version in [1u8, 2, 7] {
+        let base = pad(&render(&qr_fixture(version), 8, 4), 32);
+        for tilt in Tilt::ALL {
+            for shrink in [0.0, 0.05, 0.10, 0.15] {
+                let g = keystone(&base, shrink, tilt);
+                let (_, micros) = detect_all_luma(&g.px, g.w, g.h);
+                assert!(
+                    micros.is_empty(),
+                    "v{version} at a {}% keystone about {tilt:?}: {} phantom micro symbols",
+                    shrink * 100.0,
+                    micros.len()
+                );
+            }
+        }
+    }
 }
 
 #[test]
