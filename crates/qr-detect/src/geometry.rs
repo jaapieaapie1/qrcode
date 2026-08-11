@@ -25,7 +25,7 @@ impl Point {
     pub fn distance(self, other: Point) -> f64 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
-        (dx * dx + dy * dy).sqrt()
+        crate::mathf::sqrt(dx * dx + dy * dy)
     }
 
     /// Squared Euclidean distance to `other` (no `sqrt`).

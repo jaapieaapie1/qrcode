@@ -16,6 +16,15 @@ publish = false
 qr-core = { path = "../crates/qr-core" }
 qr-encode = { path = "../crates/qr-encode" }
 qr-decode = { path = "../crates/qr-decode" }
+# The detector is the one crate whose defaults must be turned off: `std` is on
+# by default there (it is what carries the `image` dependency), and this target
+# has neither. `decode` and `micro` are the two the firmware exercises, so they
+# are named back explicitly — which is also the exact feature set the CI
+# cross-target job checks.
+qr-detect = { path = "../crates/qr-detect", default-features = false, features = [
+    "decode",
+    "micro",
+] }
 
 [profile.dev]
 panic = "abort"

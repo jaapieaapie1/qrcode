@@ -329,6 +329,15 @@ pub fn heap_peak() -> usize {
     ALLOCATOR.peak.get()
 }
 
+/// Bytes currently handed out — the bump pointer itself.
+///
+/// Where [`heap_peak`] answers "did this fit", this answers "what is still
+/// standing", which is what lets a suite break its own peak down into the
+/// buffers that produced it.
+pub fn heap_used() -> usize {
+    ALLOCATOR.next.get()
+}
+
 /// Releases the whole arena, as an embedded firmware would between phases of
 /// work. The high-water mark is deliberately kept, so [`heap_peak`] still
 /// reports the largest a single phase ever grew.

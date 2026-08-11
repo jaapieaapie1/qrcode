@@ -120,20 +120,55 @@
 //! also run through `qr_decode::decode`. Disable with `--no-default-features`
 //! for a detection-only build. With `micro` and `decode` both on, micro symbols
 //! go through `qr_decode::micro::decode_micro` the same way.
+//!
+//! Note a semantic change since the `std` feature landed: bare
+//! `--no-default-features` now sheds `std` (and with it the `image`-typed
+//! entry points) in addition to `decode` and `micro`. Callers that want the
+//! old "detection-only but std" build should ask for
+//! `--no-default-features --features std`.
+//!
+//! # `no_std`
+//!
+//! The `std` cargo feature is on by default and is what the `image` dependency
+//! hangs off. Turning it off (`--no-default-features --features decode,micro`)
+//! gives a `#![no_std]` + `alloc` build for ESP32-class targets. What changes:
+//!
+//! * The four `GrayImage`-typed conveniences — `detect`, `read_one`,
+//!   `detect_micro`, `detect_all` — disappear along with `image` itself.
+//!   Their `_luma` counterparts, which take a raw `&[u8]` and are what those
+//!   four have always forwarded to, are unchanged and are the whole API on such
+//!   a build.
+//! * The float math routes through the hand-rolled [`mathf`] module instead of
+//!   `std`'s. See its docs for the accuracy the substitution costs (an ulp on
+//!   `sqrt`, nothing measurable elsewhere) and for how the equivalence is
+//!   verified against the detection corpus rather than merely against the
+//!   floats.
+//!
+//! Nothing else moves: the binarizer, finder scan, grouping, sampler and micro
+//! path are the same code on both. The pipeline still allocates — see the
+//! module docs on [`binarize::Binary`] for the frame-size budget — so a target
+//! needs a heap, just not an operating system.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
 
 mod binarize;
 mod finder;
 mod geometry;
 mod grouping;
+mod mathf;
 #[cfg(feature = "micro")]
 mod micro;
 mod sampler;
 
 pub use geometry::{PerspectiveTransform, Point};
 
+use alloc::vec::Vec;
 use binarize::Binary;
 use finder::Finder;
 use grouping::QrCandidate;
+#[cfg(feature = "std")]
 use image::GrayImage;
 use qr_core::BitMatrix;
 
@@ -153,6 +188,9 @@ pub struct Detection {
 /// Detects every QR symbol in a grayscale image.
 ///
 /// Returns one [`Detection`] per located symbol (possibly empty).
+///
+/// Requires the `std` feature; without it use [`detect_luma`] directly.
+#[cfg(feature = "std")]
 pub fn detect(img: &GrayImage) -> Vec<Detection> {
     detect_luma(img.as_raw(), img.width(), img.height())
 }
@@ -296,6 +334,9 @@ fn collect_qr(bin: &Binary, candidates: &[QrCandidate]) -> Vec<Detection> {
 }
 
 /// Detects and returns the single best (first) symbol, or `None`.
+///
+/// Requires the `std` feature; without it use [`read_one_luma`] directly.
+#[cfg(feature = "std")]
 pub fn read_one(img: &GrayImage) -> Option<Detection> {
     read_one_luma(img.as_raw(), img.width(), img.height())
 }
@@ -359,7 +400,7 @@ pub struct MicroDetection {
 ///
 /// Micro symbols are anchored on finder patterns that no QR triple claimed, so
 /// a QR symbol in the same image never yields phantom micro detections.
-#[cfg(feature = "micro")]
+#[cfg(all(feature = "micro", feature = "std"))]
 pub fn detect_micro(img: &GrayImage) -> Vec<MicroDetection> {
     detect_micro_luma(img.as_raw(), img.width(), img.height())
 }
@@ -419,7 +460,7 @@ fn detect_micro_at(luma: &[u8], width: u32, height: u32, pass: Pass) -> Outcome<
 ///
 /// Equivalent to calling [`detect`] and [`detect_micro`], but binarizes and
 /// scans for finder patterns only once.
-#[cfg(feature = "micro")]
+#[cfg(all(feature = "micro", feature = "std"))]
 pub fn detect_all(img: &GrayImage) -> (Vec<Detection>, Vec<MicroDetection>) {
     detect_all_luma(img.as_raw(), img.width(), img.height())
 }

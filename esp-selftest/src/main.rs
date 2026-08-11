@@ -1,15 +1,15 @@
 //! ESP32-class execution self-test for the `qr-core` / `qr-encode` /
-//! `qr-decode` stack.
+//! `qr-decode` / `qr-detect` stack.
 //!
 //! `cargo check --target riscv32imc-unknown-none-elf` proves the crates
 //! *compile* for an ESP32-C3-class core. This binary proves they *run* there:
 //! it is a bare-metal firmware for the QEMU `virt` machine — no `std`, no
 //! operating system, no external crate, a hand-rolled reset vector, a 192 KiB
-//! bump heap and a UART for output — that exercises the encoder and decoder end
-//! to end and reports through the SiFive test finisher so QEMU's exit status is
-//! the verdict.
+//! bump heap and a UART for output — that exercises the encoder, decoder and
+//! detector end to end and reports through the SiFive test finisher so QEMU's
+//! exit status is the verdict.
 //!
-//! Four suites run, in order:
+//! Five suites run, in order:
 //!
 //! 1. **QR roundtrip** — versions 1, 2, 3, 5, 7, 8 and 10 (so both character
 //!    count widths and both with and without version information) at all four
@@ -24,6 +24,12 @@
 //! 4. **ISO 7.5.1 misdecode protection** — the symbols whose correction
 //!    capacity `r` is below the Reed-Solomon bound must *reject* the extra
 //!    error rather than hand back a confident wrong answer.
+//! 5. **Detection from a luma frame** — a synthetic QVGA (320x240) camera frame
+//!    carrying one QR v2 and one Micro QR M3 symbol, drawn module-by-module in
+//!    this binary, put through `qr_detect::detect_all_luma` and required to
+//!    locate and decode both. This is the suite the 192 KiB arena is sized
+//!    against; it prints its own frame/pipeline split, and the heap peak at the
+//!    end of the run is its peak.
 //!
 //! # Building
 //!
@@ -522,8 +528,142 @@ fn suite_rcap() -> Result<usize, Failed> {
 }
 
 // ---------------------------------------------------------------------------
+// Suite 5 — detection from a camera-shaped luma frame
+// ---------------------------------------------------------------------------
+// A smoke test, not an envelope test: the frame is clean, upright and well
+// lit. It proves the no_std pipeline runs and decodes on this core within the
+// heap arena; robustness envelopes live in the host-side suites.
+
+/// A QVGA frame: the smallest resolution an ESP32-CAM-class sensor is usually
+/// driven at, and the one the memory audit in `handoff/REVIEW-REQUEST-nostd.md`
+/// is written against.
+const FRAME_W: usize = 320;
+const FRAME_H: usize = 240;
+
+/// Pixels per module. Six is comfortably above the three the sampler needs and
+/// leaves room for both symbols plus quiet zones inside 320x240.
+const SCALE: usize = 6;
+
+/// Luma values for a light and a dark module. Deliberately not 255/0: a real
+/// sensor never sees either, and leaving headroom at both ends keeps the frame
+/// something the adaptive threshold has to actually work on.
+const LIGHT: u8 = 235;
+const DARK: u8 = 25;
+
+/// Draws `matrix` into `frame` with its top-left module at `(ox, oy)`.
+///
+/// This is the whole "renderer": module (i, j) becomes a SCALE x SCALE block.
+/// Doing it here rather than depending on `qr-render` keeps that crate — which
+/// is `std` and pulls in `image` — out of a bare-metal binary, and keeps this
+/// suite testing the detector rather than a rendering path.
+fn draw(frame: &mut [u8], matrix: &BitMatrix, ox: usize, oy: usize) {
+    let size = matrix.size() as usize;
+    for j in 0..size {
+        for i in 0..size {
+            if !matrix.get(i as u32, j as u32) {
+                continue;
+            }
+            for dy in 0..SCALE {
+                let row = (oy + j * SCALE + dy) * FRAME_W;
+                for dx in 0..SCALE {
+                    frame[row + ox + i * SCALE + dx] = DARK;
+                }
+            }
+        }
+    }
+}
+
+/// Detects and decodes both symbologies out of one synthetic QVGA frame.
+///
+/// The two symbols share a frame on purpose. `detect_all_luma` binarizes and
+/// scans for finder patterns once and hands the finders to both groupers, so a
+/// single frame exercises the QR triple path *and* the single-finder micro path
+/// — including the rule that a finder claimed by a QR triple never yields a
+/// phantom micro detection — at the cost of one QVGA buffer rather than two.
+/// That matters here: the bump allocator cannot reclaim a frame mid-suite, so a
+/// second one would double the peak this suite is measuring.
+fn suite_detect() -> Result<usize, Failed> {
+    let qr_text = b"esp32 detect v2";
+    let micro_text = b"m3-ok";
+
+    let v2 = Version::new(2).expect("version 2");
+    let qr = encode_at(qr_text, v2, EcLevel::M)?;
+    let m3 = MicroVersion::M3;
+    let Some(micro) = micro_at(micro_text, m3, MicroEcLevel::L)? else {
+        println!("\n    FAIL: M3-L rejected a 5-byte payload");
+        return Err(Failed);
+    };
+
+    // Measured from here, so the split below reports the frame and the
+    // pipeline rather than the encoder's leftovers.
+    let before_frame = runtime::heap_used();
+    let mut frame = alloc::vec![LIGHT; FRAME_W * FRAME_H];
+    // QR on the left, micro on the right, both vertically centred. The gaps to
+    // the frame edges and between the two symbols are all >= 4 modules, which
+    // is the quiet zone ISO requires and the detector's separator logic wants.
+    draw(&mut frame, &qr, 24, 44);
+    draw(&mut frame, &micro, 206, 76);
+    let frame_bytes = runtime::heap_used() - before_frame;
+
+    let (qr_found, micro_found) =
+        qr_detect::detect_all_luma(&frame, FRAME_W as u32, FRAME_H as u32);
+    let pipeline_bytes = runtime::heap_used() - before_frame - frame_bytes;
+
+    ensure!(
+        qr_found.len() == 1,
+        "expected exactly 1 QR detection, got {}",
+        qr_found.len()
+    );
+    ensure!(
+        micro_found.len() == 1,
+        "expected exactly 1 micro detection, got {}",
+        micro_found.len()
+    );
+
+    let Some(decoded) = qr_found[0].decoded.as_ref() else {
+        println!("\n    FAIL: the QR symbol was located but did not decode");
+        return Err(Failed);
+    };
+    ensure!(
+        decoded.bytes == qr_text,
+        "QR payload differs: {} bytes back",
+        decoded.bytes.len()
+    );
+    ensure!(
+        decoded.version == v2,
+        "QR decoded as v{}, expected v2",
+        decoded.version.number()
+    );
+
+    let Some(decoded_micro) = micro_found[0].decoded.as_ref() else {
+        println!("\n    FAIL: the micro symbol was located but did not decode");
+        return Err(Failed);
+    };
+    ensure!(
+        decoded_micro.bytes == micro_text,
+        "micro payload differs: {} bytes back",
+        decoded_micro.bytes.len()
+    );
+    ensure!(
+        decoded_micro.version == m3,
+        "micro decoded as M{}, expected M3",
+        decoded_micro.version.number()
+    );
+
+    println!();
+    println!(
+        "        {FRAME_W}x{FRAME_H} luma frame {frame_bytes} B + pipeline {pipeline_bytes} B"
+    );
+    print!("       ");
+    Ok(2)
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/// How many suites the run reports out of.
+const SUITES: usize = 5;
 
 /// Runs a suite, printing its name padded to a fixed width, then its verdict.
 ///
@@ -536,7 +676,7 @@ fn run(index: usize, name: &str, suite: fn() -> Result<usize, Failed>, unit: &st
     // returns only a count, and this runs before the next one allocates.
     unsafe { runtime::heap_reset() };
 
-    print!("[{index}/4] {name}");
+    print!("[{index}/{SUITES}] {name}");
     for _ in name.len()..38 {
         print!(".");
     }
@@ -546,7 +686,7 @@ fn run(index: usize, name: &str, suite: fn() -> Result<usize, Failed>, unit: &st
             true
         }
         Err(Failed) => {
-            println!("[{index}/4] {name}: FAILED");
+            println!("[{index}/{SUITES}] {name}: FAILED");
             false
         }
     }
@@ -559,7 +699,7 @@ fn run(index: usize, name: &str, suite: fn() -> Result<usize, Failed>, unit: &st
 pub extern "C" fn rust_main() -> ! {
     println!();
     println!("qr-selftest: riscv32imc-unknown-none-elf on qemu virt");
-    println!("             qr-core + qr-encode + qr-decode, no_std + alloc");
+    println!("             qr-core + qr-encode + qr-decode + qr-detect, no_std + alloc");
     println!();
 
     let ok = run(
@@ -569,7 +709,13 @@ pub extern "C" fn rust_main() -> ! {
         "symbols",
     ) && run(2, "micro qr, all 8 symbols", suite_micro, "symbols")
         && run(3, "reed-solomon recovery", suite_reed_solomon, "cases")
-        && run(4, "iso 7.5.1 misdecode protection", suite_rcap, "cases");
+        && run(4, "iso 7.5.1 misdecode protection", suite_rcap, "cases")
+        && run(
+            5,
+            "detection from a qvga luma frame",
+            suite_detect,
+            "symbols",
+        );
 
     println!();
     println!(

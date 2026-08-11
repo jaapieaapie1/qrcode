@@ -27,6 +27,8 @@
 //! nothing at all, runs [`binarize_retry`] over the whole frame — every one of
 //! the three moved at once. See the crate docs for what that costs.
 
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ops::{Add, Mul, Sub};
 
 /// A binarized image. `true` = dark module, `false` = light. Coordinates are

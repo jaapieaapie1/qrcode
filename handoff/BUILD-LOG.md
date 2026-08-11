@@ -5,7 +5,7 @@
 
 ## Current Status
 
-**Active step:** Step 9 (benchmarks) BUILT, awaiting review — see `handoff/REVIEW-REQUEST-bench.md`. Step 7 COMPLETE (esp-selftest committed, esp32-emulation CI job green on GitHub in 54s: run 31439384048).
+**Active step:** Step 13 (no_std qr-detect) BUILT, awaiting review — see `handoff/REVIEW-REQUEST-nostd.md`. Step 9 (benchmarks) BUILT, awaiting review — see `handoff/REVIEW-REQUEST-bench.md`. Step 7 COMPLETE (esp-selftest committed, esp32-emulation CI job green on GitHub in 54s: run 31439384048).
 **Last cleared:** Waves 1–3 complete + Step 4 detect fix (afa3d30) + CI (f13fa3a)
 **Pending deploy:** NO — remote github.com/jaapieaapie1/qrcode (private), CI green incl. esp32-emulation
 
@@ -18,6 +18,77 @@ Wave 4 decisions:
 ---
 
 ## Step History
+
+### Step 13 — no_std qr-detect for ESP32-class targets — BUILT, AWAITING REVIEW
+*Date: 2026-08-11 · Builder: Bob-NSD · Review request: `handoff/REVIEW-REQUEST-nostd.md`*
+
+`qr-detect` gains a default-on `std` feature; without it the crate is `#![no_std]`
++ `alloc`, drops `image`, and the whole pipeline compiles **and runs** on
+`riscv32imc-unknown-none-elf`.
+
+Files changed: `crates/qr-detect/{Cargo.toml,src/lib.rs,src/mathf.rs (new),
+src/binarize.rs,src/finder.rs,src/geometry.rs,src/grouping.rs,src/sampler.rs,
+src/micro.rs}`, `esp-selftest/{Cargo.toml,src/main.rs,src/runtime.rs}`,
+`.github/workflows/ci.yml`. Zero edits elsewhere; root `Cargo.toml` untouched;
+zero new dependencies; zero new `unsafe`.
+
+Key decisions:
+- `default = ["std", "decode", "micro"]`, `std = ["dep:image"]`. `std` only
+  *adds* the four `GrayImage` conveniences (`detect`, `read_one`, `detect_micro`,
+  `detect_all`), which were always one-line forwards to the `_luma` entry points
+  — so additivity holds and every existing consumer (qr-video, demo-wasm,
+  tests-integration, benchmarks) resolves to exactly the crate it did before,
+  with no edits.
+- New `mathf` module: exactly the four routines `core` lacks and the pipeline
+  forms — `sqrt`, `ceil`, `round`, `sin_cos`. Grep-driven, not speculative:
+  `atan2`/`hypot`/`powf`/`ln`/`floor` appear only in `std`-only test fixtures.
+  `core` was *measured* to already carry `abs`/`min`/`max`/`clamp`/`signum`/
+  `copysign`/`to_radians`/`is_finite`.
+- Under `std` every `mathf` function is an `#[inline]` forward to the `std`
+  method: zero behaviour change for existing users, confirmed by benchmarks
+  within ±2% of the README baseline.
+- **Free functions, not an extension trait.** Inherent methods win method
+  resolution, so a trait's `sqrt` would be silently shadowed by `f64::sqrt` on a
+  `std` build and the verification switch would test nothing.
+- **`qr_detect_soft_float` is a `--cfg`, not a cargo feature**, because it
+  changes results (by at most an ulp) and features must be additive. Declared in
+  `[lints.rust]` `check-cfg`.
+- `sin_cos` and its whole reduction/polynomial block is gated on `feature =
+  "micro"` — nothing else forms an angle — so a micro-off bare-metal build is
+  clippy-clean.
+
+Accuracy (differential-tested against `std`, ~2.1 M points, asserted not printed):
+`sqrt` 1 ulp / 2.2204e-16 relative over `[0, MAX]` incl. subnormals;
+`ceil`/`round` bit-exact incl. `±0`/`±inf`/NaN; `sin_cos` 2.2204e-16 absolute
+over `|x| <= 2^20`. Brief targeted 1e-9 rel / 1e-7 abs.
+
+Equivalence verified on **detections**, not floats, two independent ways:
+(a) `cargo test -p qr-detect --no-default-features --features decode,micro` runs
+the real `no_std` build against the full 90-test corpus natively (the host test
+harness links `std` around a `#![no_std]` lib);
+(b) `RUSTFLAGS='--cfg qr_detect_soft_float' cargo test --workspace` puts
+tests-integration's warp/fuzz/multiscan and qr-video's tracking suites on the
+bare-metal arithmetic. Both green. Both are now CI lanes.
+
+Memory audit (measured with a tracking `GlobalAlloc`, host):
+`pipeline_peak = w*h + 4*(2w+1)` on the primary pass, `+ w*h` on the retry
+(denoised copy held alongside the second `Binary`). QVGA 320x240: 79,364 B over
+the frame → **156,164 B** total, 232,964 B on the retry path. VGA 640x480:
+312,324 B → **619,524 B**, 926,724 B on the retry path. VGA does **not** fit an
+ESP32-C3.
+
+esp-selftest suite 5: synthetic QVGA frame carrying one QR v2 and one Micro QR
+M3, drawn module-by-module in the firmware (no `qr-render` dep), through
+`detect_all_luma`, both located and decoded. QEMU **ALL PASS**, exit 0, **heap
+peak 163,544 of 196,608 bytes (83.2%)**.
+
+CI: `cross-targets` gains three qr-detect checks (both bare-metal targets at
+`decode,micro`, plus a no-optional-features shape that caught a real dead-code
+failure); `test` gains the two equivalence lanes; `lint` gains a no_std clippy
+lane; the QEMU job's log assertions tightened to require suite 5's own output.
+
+Full DoD table in the review request. Everything green; nothing deferred except
+KG-22.
 
 ### Step 9 — benchmarks — BUILT, AWAITING REVIEW
 *Date: 2026-08-11 · Builder: Bob-BM · Review request: `handoff/REVIEW-REQUEST-bench.md`*
@@ -241,7 +312,8 @@ See handoff/REVIEW-REQUEST-esp-selftest.md.
 - **KG-19** — micro detect: square_axes (aspect assumption in orientation frames) is the next envelope limiter for M4/far-edge-compressed directions past 12% keystone — logged 2026-08-11
 - **KG-17** — CLOSED by Step 11a (5c7f732): can_be_dark dynamic-range proof skips the adaptive pass AND the retry on flat frames; 6.9ms → 321µs
 - **KG-21** — qr-video ROI path intentionally excludes the low-light ladder (window collapse inside crops; miss-fallback + ROI abandonment reach the full ladder within ~100ms) — documented at detect_in_roi, ruled by Richard-LL — logged 2026-08-11
-- **KG-20** — esp-selftest heap peak rose 75→124KB at commit 7f75a0b (segmentation DP tables); Step 11b brought encode's own share down (112.8KB total now). Still comfortable in 192KB arena; watch if more DP state lands — logged 2026-08-11
+- **KG-22** — detect: `Binary::dark` is `Vec<bool>` at 1 byte/pixel. Bit-packing it would cut the total working set 43% at QVGA (156,164 → 88,964 B) and 43% at VGA (619,524 → 350,724 B) — at VGA that is roughly the difference between fitting an ESP32-S3's 512 KB SRAM and not. Declined in Step 13 because it is not trivial: `Binary::row(y) -> &[bool]` exists specifically so the finder scan (the only stage that reads every pixel) walks a contiguous slice instead of paying a bounds check and an `i64 -> usize` per pixel, and a packed representation cannot return it. Wants its own step, measured against the `detect_luma` benchmark rows — logged 2026-08-11
+- **KG-20** — esp-selftest heap peak rose 75→124KB at commit 7f75a0b (segmentation DP tables); Step 11b brought encode's own share down (112.8KB total now). Still comfortable in 192KB arena; watch if more DP state lands — logged 2026-08-11. **Superseded as the run-level peak by Step 13's detection suite: 163,544 B (83.2%), 33 KB spare** — 2026-08-11
 - **KG-17** — detect: a *featureless* frame binarizes twice. `binarize.rs:90-96` discards the completed Bradley pass (integral image + 921,600 window evaluations) when `dark_count == 0 || dark_count == total` and runs a full Otsu pass over the whole frame on top of it. A uniform frame always hits `dark_count == 0`, so it pays for two binarizations instead of one; `detect_luma` then finds nothing and retries, doing both again. Measured in Step 9 on 720p: flat frame 6.88 ms vs cluttered symbol-free frame 4.07 ms vs happy path 2.13 ms; single-pass 3.44 ms flat vs 2.04 ms cluttered, and that 1.40 ms delta is exactly one Otsu pass over 921,600 px. NOT finder-scan cost — the resulting binary image is uniform, so the finder scan on a flat frame is the cheapest it ever gets (root cause identified by Richard-BM, correcting Bob's initial guess). Fix is small and local to `binarize.rs`: decide before paying for the adaptive pass, or reuse its statistics. Richard recommends its own step against qr-detect rather than leaving it here — logged 2026-08-11
 
 ---

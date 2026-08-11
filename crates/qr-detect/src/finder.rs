@@ -5,6 +5,8 @@
 //! profile through its centre, then clusters coincident hits into stable
 //! candidate centres.
 
+use alloc::vec::Vec;
+
 use crate::binarize::Binary;
 use crate::geometry::Point;
 

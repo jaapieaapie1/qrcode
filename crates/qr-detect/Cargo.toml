@@ -6,10 +6,32 @@ license.workspace = true
 
 [dependencies]
 qr-core = { workspace = true }
-image = { workspace = true }
+image = { workspace = true, optional = true }
 qr-decode = { workspace = true, optional = true }
 
+[lints.rust]
+# `qr_detect_soft_float` is a verification switch, not a cargo feature: it forces
+# the hand-rolled `mathf` implementations even on a `std` build, so the exact
+# arithmetic a bare-metal target will run can be exercised by the native test
+# suite. A cargo feature would be wrong here — features must be additive, and
+# this one changes results (by at most an ulp). Build it with
+# `RUSTFLAGS='--cfg qr_detect_soft_float'`.
+#
+# NOTE: check-cfg below only lints `cfg(...)` spellings in SOURCE — a
+# misspelled `--cfg` on the command line compiles silently and would turn the
+# CI equivalence lane into a no-op. The lane therefore carries its own
+# liveness check (it greps the build output for the soft-float marker test).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(qr_detect_soft_float)'] }
+
 [features]
+# `std` is what the `image`-typed entry points (`detect`, `detect_micro`,
+# `detect_all`, `read_one`) and the libm-backed float methods live behind. On by
+# default, so a plain `qr-detect = "…"` is exactly the crate it always was.
+# Turning it off gives a `#![no_std]` + `alloc` build for ESP32-class targets:
+# the `_luma` entry points, `Detection`/`MicroDetection` and the whole pipeline
+# stay, the `image` dependency disappears, and the float math routes through the
+# hand-rolled `mathf` module instead of `std`.
+#
 # `decode` wires the sampled BitMatrix through the sibling qr-decode crate
 # (`qr_decode::decode(&BitMatrix) -> Result<Decoded, _>`). On by default now
 # that qr-decode exports that API; disable with `--no-default-features` to build
@@ -26,6 +48,7 @@ qr-decode = { workspace = true, optional = true }
 # micro module on if and only if `decode` has pulled qr-decode in, so `micro`
 # alone never drags in the optional dependency, and `micro` + `decode` can never
 # reach for a `qr_decode::micro` that was compiled out.
-default = ["decode", "micro"]
+default = ["std", "decode", "micro"]
+std = ["dep:image"]
 decode = ["dep:qr-decode"]
 micro = ["qr-core/micro", "qr-decode?/micro"]

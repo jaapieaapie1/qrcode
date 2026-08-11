@@ -6,6 +6,9 @@
 //! size), then greedily accept non-overlapping triples so multiple codes in one
 //! image are handled.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::finder::Finder;
 use crate::geometry::Point;
 
@@ -61,7 +64,7 @@ fn snap_dimension(raw: f64) -> Option<u32> {
     if !raw.is_finite() || raw < 17.0 {
         return None;
     }
-    let mut d = raw.round() as i64;
+    let mut d = crate::mathf::round(raw) as i64;
     match d.rem_euclid(4) {
         0 => d += 1,
         2 => d -= 1,

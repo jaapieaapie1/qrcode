@@ -30,6 +30,28 @@ jobs:
       # build of the foundation crate on its own.
       - name: Test qr-core with micro off
         run: cargo test -p qr-core --no-default-features
+      # The `no_std` shape of the detector, run rather than merely checked. The
+      # library is `#![no_std]` here — no `image`, hand-rolled float math — but
+      # the host test harness links `std` around it, so the entire existing
+      # detection corpus executes against the exact code the ESP32 target gets.
+      - name: Test qr-detect as no_std
+        run: cargo test -p qr-detect --no-default-features --features decode,micro
+      # The same substitution the other way round: `std` and `image` present,
+      # but the whole pipeline routed through the hand-rolled `mathf`. That puts
+      # the cross-crate suites in tests-integration and qr-video — warp, fuzz,
+      # multiscan, video tracking — on the bare-metal arithmetic too, which is
+      # what makes "the two paths reach the same detections" a tested claim
+      # rather than an assumption about ulps.
+      - name: Test workspace on the hand-rolled float path
+        # The trailing exact-name test only exists under the cfg; grepping for
+        # its result keeps a misspelled --cfg from turning this lane into a
+        # silently green no-op (check-cfg cannot catch command-line typos).
+        run: |
+          cargo test --workspace
+          cargo test -p qr-detect --lib soft_float_lane_is_live \
+            | grep -q 'test result: ok. 1 passed'
+        env:
+          RUSTFLAGS: -D warnings --cfg qr_detect_soft_float
 
   lint:
     name: Clippy + fmt
@@ -46,6 +68,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Clippy (no default features)
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      - name: Clippy (detector as no_std)
+        run: cargo clippy -p qr-detect --all-targets --no-default-features --features decode,micro -- -D warnings
 
   bench-smoke:
     name: Benchmarks (smoke)
@@ -79,6 +103,19 @@ jobs:
         run: cargo check -p qr-core -p qr-encode -p qr-decode --target riscv32imc-unknown-none-elf
       - name: no_std crates without default features (bare-metal ARM)
         run: cargo check -p qr-core -p qr-encode -p qr-decode --no-default-features --target thumbv7em-none-eabihf
+      # qr-detect needs its own lines: `std` is on by default there (it carries
+      # the optional `image` dependency), so unlike the three above it has to be
+      # asked for the bare-metal shape explicitly. The feature set named here is
+      # the one esp-selftest links, so this step and the QEMU job below check
+      # and then execute the same build.
+      - name: Detector on bare-metal ARM (Cortex-M)
+        run: cargo check -p qr-detect --no-default-features --features decode,micro --target thumbv7em-none-eabihf
+      - name: Detector on bare-metal RISC-V (ESP32-C3 class)
+        run: cargo check -p qr-detect --no-default-features --features decode,micro --target riscv32imc-unknown-none-elf
+      # Detection-only and micro-off shapes, so a feature combination cannot rot
+      # into a dead-code or missing-import failure unnoticed.
+      - name: Detector on bare-metal ARM, no optional features
+        run: cargo check -p qr-detect --no-default-features --target thumbv7em-none-eabihf
       - name: All crates on wasm32
         run: cargo check -p qr-core -p qr-encode -p qr-decode -p qr-detect -p qr-render -p qr-video --target wasm32-unknown-unknown
 
@@ -173,3 +210,7 @@ jobs:
           # pipefail above propagates. Insist on the banner too, so a QEMU that
           # ignored the finisher or a run killed by `timeout` cannot pass.
           grep -q '^ALL PASS' run.log
+          # And on the detection suite's own line, so a suite that stopped being
+          # run cannot pass by simply not failing.
+          grep -q '320x240 luma frame' run.log
+          grep -q '^heap peak' run.log

@@ -36,9 +36,13 @@
 //!    discriminator that keeps a lone finder-shaped blob, or a QR finder whose
 //!    triple was rejected, from being reported as a micro symbol.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::binarize::Binary;
 use crate::finder::Finder;
 use crate::geometry::{PerspectiveTransform, Point};
+use crate::mathf::{round, sin_cos, sqrt};
 use qr_core::BitMatrix;
 use qr_core::micro::{MicroVersion, micro_is_function_module};
 
@@ -203,7 +207,7 @@ fn square_axes(bin: &Binary, finder: &Finder) -> Option<(Point, Point)> {
     let mut valid = [false; RAYS];
     for (i, (r, ok)) in radius.iter_mut().zip(valid.iter_mut()).enumerate() {
         let phi = i as f64 * core::f64::consts::TAU / RAYS as f64;
-        let (s, c) = phi.sin_cos();
+        let (s, c) = sin_cos(phi);
         if let Some(hit) = boundary_radius(bin, finder.center, c, s, step, max_r, min_run) {
             *r = hit;
             *ok = true;
@@ -241,7 +245,7 @@ fn square_axes(bin: &Binary, finder: &Finder) -> Option<(Point, Point)> {
                 continue;
             }
             let phi = idx as f64 * core::f64::consts::TAU / RAYS as f64;
-            let (s, c) = phi.sin_cos();
+            let (s, c) = sin_cos(phi);
             found = Some((
                 radius[idx],
                 Point::new(
@@ -294,8 +298,8 @@ fn boundary_radius(
 ) -> Option<f64> {
     let sample = |r: f64| {
         bin.get(
-            (center.x + cx * r).round() as i64,
-            (center.y + cy * r).round() as i64,
+            round(center.x + cx * r) as i64,
+            round(center.y + cy * r) as i64,
         )
     };
     if !sample(0.0) {
@@ -894,7 +898,7 @@ fn quiet_zone_dark(bin: &Binary, transform: &PerspectiveTransform, dim: u32) -> 
 /// pixel.
 #[inline]
 fn sample_at(bin: &Binary, p: Point) -> bool {
-    bin.get(p.x.round() as i64, p.y.round() as i64)
+    bin.get(round(p.x) as i64, round(p.y) as i64)
 }
 
 /// Records that a frame needed perspective refinement.
@@ -952,7 +956,7 @@ fn neg(a: Point) -> Point {
 
 #[inline]
 fn len(a: Point) -> f64 {
-    (a.x * a.x + a.y * a.y).sqrt()
+    sqrt(a.x * a.x + a.y * a.y)
 }
 
 #[inline]
@@ -969,7 +973,7 @@ fn cross2(a: Point, b: Point) -> f64 {
 /// downward).
 #[inline]
 fn rot(a: Point, angle: f64) -> Point {
-    let (s, c) = angle.sin_cos();
+    let (s, c) = sin_cos(angle);
     Point::new(a.x * c - a.y * s, a.x * s + a.y * c)
 }
 

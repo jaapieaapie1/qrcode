@@ -7,6 +7,7 @@
 use crate::binarize::Binary;
 use crate::geometry::{PerspectiveTransform, Point};
 use crate::grouping::QrCandidate;
+use crate::mathf::{ceil, round, sqrt};
 use qr_core::{BitMatrix, Version};
 
 /// Result of sampling: the raw module grid plus the four symbol corners in
@@ -55,7 +56,7 @@ pub fn sample(bin: &Binary, cand: &QrCandidate) -> Option<Sampled> {
     for row in 0..dim {
         for col in 0..dim {
             let p = transform.map(col as f64 + 0.5, row as f64 + 0.5);
-            let dark = bin.get(p.x.round() as i64, p.y.round() as i64);
+            let dark = bin.get(round(p.x) as i64, round(p.y) as i64);
             matrix.set(col, row, dark);
         }
     }
@@ -94,13 +95,13 @@ fn refine_alignment(
     let down = provisional.map(g_align.x, g_align.y + 1.0);
     let ex = Point::new(right.x - center0.x, right.y - center0.y);
     let ey = Point::new(down.x - center0.x, down.y - center0.y);
-    let modpx = ((ex.x * ex.x + ex.y * ex.y).sqrt() + (ey.x * ey.x + ey.y * ey.y).sqrt()) / 2.0;
+    let modpx = (sqrt(ex.x * ex.x + ex.y * ex.y) + sqrt(ey.x * ey.x + ey.y * ey.y)) / 2.0;
     if !modpx.is_finite() || modpx < 1.0 {
         return None;
     }
 
     // Search integer pixel offsets within ~2.5 modules of the expected centre.
-    let search = (modpx * 2.5).ceil() as i64;
+    let search = ceil(modpx * 2.5) as i64;
     let mut best: Option<(i32, f64, i64, i64)> = None; // (score, -dist, ox, oy)
     for oy in -search..=search {
         for ox in -search..=search {
@@ -126,7 +127,7 @@ fn refine_alignment(
     let px = center0.x + ox as f64;
     let py = center0.y + oy as f64;
     // Sub-pixel refine on the central dark module blob.
-    let refined = blob_center(bin, px.round() as i64, py.round() as i64);
+    let refined = blob_center(bin, round(px) as i64, round(py) as i64);
     Some((g_align, refined))
 }
 
@@ -140,7 +141,7 @@ fn template_score(bin: &Binary, px: f64, py: f64, ex: Point, ey: Point) -> i32 {
         for i in -2i32..=2 {
             let sx = px + i as f64 * ex.x + j as f64 * ey.x;
             let sy = py + i as f64 * ex.y + j as f64 * ey.y;
-            let dark = bin.get(sx.round() as i64, sy.round() as i64);
+            let dark = bin.get(round(sx) as i64, round(sy) as i64);
             // Alignment pattern: dark border ring (radius 2), light gap ring
             // (radius 1), dark centre.
             let expect_dark = i == 0 && j == 0 || i.abs() == 2 || j.abs() == 2;
@@ -167,7 +168,7 @@ fn blob_center(bin: &Binary, x: i64, y: i64) -> Point {
     }
     let cx = (left + right) as f64 / 2.0;
 
-    let mid_x = cx.round() as i64;
+    let mid_x = round(cx) as i64;
     let mut top = y;
     while top > 0 && bin.get(mid_x, top - 1) {
         top -= 1;
@@ -179,7 +180,7 @@ fn blob_center(bin: &Binary, x: i64, y: i64) -> Point {
     let cy = (top + bottom) as f64 / 2.0;
 
     // Re-centre x at the true centre row.
-    let mid_y = cy.round() as i64;
+    let mid_y = round(cy) as i64;
     let mut left = mid_x;
     while left > 0 && bin.get(left - 1, mid_y) {
         left -= 1;
