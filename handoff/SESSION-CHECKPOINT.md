@@ -1,50 +1,48 @@
-# Session Checkpoint — 2026-08-10
+# Session Checkpoint — 2026-08-11
 *Read this before reading anything else. If it covers current state, skip BUILD-LOG.*
 
 ---
 
 ## Where We Stopped
 
-Wave 4 (Micro QR M1–M4) + CI complete and committed through 2497114. Full stack:
-QR v1–40 AND Micro M1–M4 encode/decode/detect/render/video, all from scratch,
-all reviewed. `cargo test --workspace` green in both feature configs (108
-integration + per-crate suites); clippy/fmt clean; cross-targets green
-(thumbv7em, riscv32imc, wasm32). CI workflow at .github/workflows/ci.yml —
-activates on first push (NO REMOTE CONFIGURED YET).
+Through 5b3f093, all CI green (7 jobs). This session shipped: Micro QR
+perspective refinement (envelope 1%→10% keystone, ~30deg hand-held);
+benchmarks crate + baseline; perf rework (detect 3x to 687us/720p, flat
+frames 21x, encode v40 16x to 604us, all bit-identical by differential
+proof); demo camera path (stateful qr-video Scanner in wasm, 1080p
+constraints, 15fps, wasm-side luma, PNG download/copy, instant-regen
+generator); low-light + glare hardening (envelope 21.7%→56.8%, glare rule:
+blob needs d/2+2 modules clearance from finder — on-finder glare is
+physics); no_std qr-detect (std feature default-on, hand-rolled 1-ulp
+mathf, QVGA detect+decode on emulated riscv32 in 163.5KB heap).
 
----
+## Next Up (Project Owner intent)
 
-## What Was Decided This Session (Wave 4)
-
-- `micro` feature default-on everywhere, forwarded (`micro = ["qr-core/micro"]`); parallel types (MicroVersion, MicroEcLevel incl. Detection, encode_micro/decode_micro/detect_micro/detect_all)
-- M1/M3 half codeword: HIGH nibble / LEFT-JUSTIFIED into RS (KG-12 interop verification REFUTED the earlier low-nibble ruling — zxing-cpp + segno agree bit-exact; Annex N.1 describes a LEADING partial codeword padding left, ours is trailing). Golden external vectors pinned in tests-integration/tests/micro_golden.rs
-- ISO 7.5.1 misdecode caps enforced on BOTH QR and micro paths (Step 5f; behavior change for 1-L/1-M/2-L — release-note material)
-- Binarize adaptive radius /16→/8 (micro-only bug fix); vignette cost pinned at depth 0.85; two-pass binarize = KG-11
-- MAX_FUNCTION_MISMATCHES = 1, bracketed by test
-- Micro detection envelope: rotation exact 0–45° all versions, 2 px/module floor, ~4% perspective (affine-only, fails closed)
+ESP32-S3-CAM (OV3660) gate reader: camera → detect_luma → validate payload
+against gRPC server → GPIO high if valid. Decisions pending: firmware
+scaffold now vs when board arrives; network design (recommended: protobuf
+over HTTPS POST via prost + esp-idf mbedtls — real gRPC/h2 too heavy);
+whether server can grow a unary HTTP endpoint. esp-idf std shell
+recommended over bare-metal (WiFi/TLS). Xtensa toolchain (espup) needed —
+not in CI; optional xtensa check job via esp-rs/xtensa-toolchain action.
+Sensor tip: YUV422 Y plane == luma, feed directly.
 
 ## Still Open
 
-- KG-4 (Kanji SJIS→UTF-8 decode text, structured append), KG-7 (full alignment grid for severe perspective), KG-9 (estimator bias 35–40° v20+), KG-13 (bridged-timing crop), KG-14 (hardcoded micro map), KG-15 (qr-video decodable fixture), KG-16 (multi-code vignette retry limit, accepted)
-- MicroOptions has no forced-mode field (accepted); Options not non_exhaustive (revisit at crates.io publish)
-- No LICENSE files despite MIT OR Apache-2.0 in Cargo.toml — add before going public
-- GitHub server-side gc pending for full ISO-PDF purge (history rewritten 2026-08-11) — ask GitHub Support before flipping public
-
-CLOSED this session: KG-6 (DP segmentation + opt-in Kanji + ECI, 7f75a0b), KG-11 (layered binarize retry, 627c69e), KG-12 (nibble convention REFUTED + fixed both sides + golden vectors, 0c36cdc). Repo: github.com/jaapieaapie1/qrcode (private), CI green.
-
----
+- KG-4 Kanji text, KG-7 alignment grid, KG-9 estimator bias, KG-13/14/15
+  minor detect items, KG-18/19 micro detect asymmetries, KG-20 ESP heap
+  note, KG-21 ROI ladder exclusion (ruled), KG-22 Binary bit-packing
+  (43% memory cut, needs own step vs 5% bench gate)
+- Demo: binarized-view toggle needs a qr-detect debug export; camera-path
+  QR version label needs qr_video::Observation.version
+- LICENSE files before public; GitHub gc for purged ISO PDF
+- Cloudflare Pages deploy step armed, awaiting repo secrets
 
 ## Resume Prompt
-
-Copy and paste this to resume:
-
----
 
 You are Arch on this project.
 Read SESSION-CHECKPOINT.md, then ARCHITECT.md.
 Confirm where we stopped and what the next action is. Then wait.
-
----
 
 ## Version Check
 version_notified: v1.3.0
