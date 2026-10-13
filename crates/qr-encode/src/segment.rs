@@ -112,6 +112,20 @@ pub fn mode_supports(mode: Mode, data: &[u8]) -> bool {
     }
 }
 
+/// The narrowest mode that holds every byte of `data` as a single segment:
+/// numeric, alphanumeric, Kanji (only when `allow_kanji`), else byte.
+pub fn narrowest_mode(data: &[u8], allow_kanji: bool) -> Mode {
+    if mode_supports(Mode::Numeric, data) {
+        Mode::Numeric
+    } else if mode_supports(Mode::Alphanumeric, data) {
+        Mode::Alphanumeric
+    } else if allow_kanji && mode_supports(Mode::Kanji, data) {
+        Mode::Kanji
+    } else {
+        Mode::Byte
+    }
+}
+
 /// Number of payload bits (excluding mode indicator and char-count indicator)
 /// needed to encode `len` characters in `mode`.
 ///

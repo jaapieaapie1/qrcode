@@ -45,6 +45,8 @@ fn multiblock_symbol_roundtrips() {
         mode: Some(Mode::Byte),
         eci: None,
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     let m = encode(&payload, opts).expect("encode");
     let decoded = qr_decode::decode(&m).expect("decode");
@@ -70,6 +72,8 @@ fn all_forced_masks_roundtrip() {
             mode: None,
             eci: None,
             assume_shift_jis: false,
+            single_segment: false,
+            boost_ec: false,
         };
         let m = encode(payload, opts).expect("encode");
         let decoded = qr_decode::decode(&m).unwrap_or_else(|e| panic!("mask {forced}: {e:?}"));
@@ -106,6 +110,8 @@ fn version_info_symbol_roundtrips() {
             mode: Some(Mode::Byte),
             eci: None,
             assume_shift_jis: false,
+            single_segment: false,
+            boost_ec: false,
         };
         let m = encode(&payload, opts).unwrap_or_else(|e| panic!("v{n}: {e:?}"));
         let decoded = qr_decode::decode(&m).unwrap_or_else(|e| panic!("v{n} decode: {e:?}"));
@@ -169,6 +175,8 @@ fn exact_capacity_fits_and_roundtrips() {
                 mode: Some(Mode::Byte),
                 eci: None,
                 assume_shift_jis: false,
+                single_segment: false,
+                boost_ec: false,
             };
             let m = encode(&payload, opts).unwrap_or_else(|e| panic!("v{n} {ec:?} exact: {e:?}"));
             let d = qr_decode::decode(&m).unwrap_or_else(|e| panic!("v{n} {ec:?} decode: {e:?}"));
@@ -198,6 +206,8 @@ fn one_over_capacity_is_clean_error() {
             mode: Some(Mode::Byte),
             eci: None,
             assume_shift_jis: false,
+            single_segment: false,
+            boost_ec: false,
         };
         assert!(
             encode(&payload, opts).is_err(),
@@ -215,6 +225,8 @@ fn forced_mode_incompatible_errors_not_panics() {
         mode: Some(m),
         eci: None,
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     assert!(encode(b"abc", opts(Mode::Numeric)).is_err());
     assert!(encode(b"abc", opts(Mode::Alphanumeric)).is_err());
@@ -231,6 +243,8 @@ fn invalid_mask_errors() {
         mode: None,
         eci: None,
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     assert!(encode(b"123", opts).is_err());
 }

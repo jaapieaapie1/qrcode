@@ -18,7 +18,15 @@
 //! [`encode`] splits the payload into the minimal-bit sequence of numeric,
 //! alphanumeric and byte segments by dynamic programming (see the `segment`
 //! module); it is never longer than encoding the whole payload in a single
-//! mode. Setting [`Options::mode`] overrides this with one forced segment.
+//! mode. Setting [`Options::mode`] overrides this with one forced segment;
+//! [`Options::single_segment`] keeps the mode automatic but encodes the whole
+//! payload as one segment of the narrowest mode that holds every byte.
+//!
+//! # EC level boost
+//!
+//! [`Options::boost_ec`] keeps the version chosen for [`Options::ec`] but raises
+//! the level as far as that version still holds the bit stream, turning pad
+//! codewords into error correction at no cost in symbol size.
 //!
 //! # Kanji and Shift-JIS
 //!
@@ -144,6 +152,20 @@ pub struct Options {
     /// Ignored when [`Options::mode`] forces a mode; forcing
     /// [`Mode::Kanji`] is the other way to ask for Kanji segments.
     pub assume_shift_jis: bool,
+    /// Encode the whole payload as **one** segment of the narrowest mode that
+    /// holds every byte — numeric, alphanumeric, Kanji (only with
+    /// [`Options::assume_shift_jis`]), then byte — instead of the minimal-bit
+    /// mixed-mode segmentation. Some generators (printer firmware among them)
+    /// encode this way; matching them module for module needs it.
+    ///
+    /// Defaults to `false`. Ignored when [`Options::mode`] forces a mode.
+    pub single_segment: bool,
+    /// After the version is chosen (or forced) for [`Options::ec`], raise the
+    /// error-correction level to the highest one at which that same version
+    /// still holds the data. Never lowers the level or grows the symbol.
+    ///
+    /// Defaults to `false`, which encodes at exactly [`Options::ec`].
+    pub boost_ec: bool,
 }
 
 impl Options {
@@ -157,6 +179,8 @@ impl Options {
             mode: None,
             eci: None,
             assume_shift_jis: false,
+            single_segment: false,
+            boost_ec: false,
         }
     }
 }
@@ -172,7 +196,8 @@ fn data_capacity_bits(version: Version, ec: EcLevel) -> usize {
 const VERSION_GROUPS: [(u8, u8); 3] = [(1, 9), (10, 26), (27, 40)];
 
 /// Splits `data` into segments for `version`: one forced segment when the
-/// caller pinned a mode, otherwise the minimal-bit segmentation.
+/// caller pinned a mode, one segment of the narrowest mode when the caller
+/// asked for a single segment, otherwise the minimal-bit segmentation.
 ///
 /// Kanji segments are only ever produced from an explicit caller assertion —
 /// `Options::mode = Some(Mode::Kanji)` here, or `Options::assume_shift_jis`
@@ -190,6 +215,11 @@ fn segments_for(
                 Err(EncodeError::ModeMismatch)
             }
         }
+        None if options.single_segment => Ok(vec![Segment::new(
+            segment::narrowest_mode(data, options.assume_shift_jis),
+            0,
+            data.len(),
+        )]),
         None => Ok(segment::optimal_segments(
             data,
             version,
@@ -204,7 +234,12 @@ fn segments_for(
 /// segmenting once per group and returning the first version whose data
 /// capacity holds the resulting bit stream — still the smallest fitting
 /// version, because the bit count is constant inside a group.
-fn resolve_plan(data: &[u8], options: &Options) -> Result<(Version, Vec<Segment>), EncodeError> {
+///
+/// Also returns the stream's length in bits, for [`boosted_ec`].
+fn resolve_plan(
+    data: &[u8],
+    options: &Options,
+) -> Result<(Version, Vec<Segment>, usize), EncodeError> {
     let eci_bits = match options.eci {
         Some(v) => segment::eci_bits(v).ok_or(EncodeError::InvalidEci)?,
         None => 0,
@@ -215,7 +250,7 @@ fn resolve_plan(data: &[u8], options: &Options) -> Result<(Version, Vec<Segment>
         let bits =
             segment::segments_bits(&segments, v).ok_or(EncodeError::ModeMismatch)? + eci_bits;
         return if bits <= data_capacity_bits(v, options.ec) {
-            Ok((v, segments))
+            Ok((v, segments, bits))
         } else {
             Err(EncodeError::DataTooLarge)
         };
@@ -229,11 +264,21 @@ fn resolve_plan(data: &[u8], options: &Options) -> Result<(Version, Vec<Segment>
         for n in first..=last {
             let v = Version::new(n).map_err(|_| EncodeError::InvalidVersion)?;
             if bits <= data_capacity_bits(v, options.ec) {
-                return Ok((v, segments));
+                return Ok((v, segments, bits));
             }
         }
     }
     Err(EncodeError::DataTooLarge)
+}
+
+/// The highest EC level, from `ec` up, whose capacity in `version` holds
+/// `bits`. The caller guarantees `bits` fits at `ec` itself.
+fn boosted_ec(version: Version, ec: EcLevel, bits: usize) -> EcLevel {
+    [EcLevel::H, EcLevel::Q, EcLevel::M]
+        .into_iter()
+        .take_while(|&higher| higher != ec)
+        .find(|&higher| bits <= data_capacity_bits(version, higher))
+        .unwrap_or(ec)
 }
 
 /// Assembles the padded data-codeword stream (before block splitting).
@@ -290,8 +335,12 @@ pub fn encode(data: &[u8], options: Options) -> Result<BitMatrix, EncodeError> {
         return Err(EncodeError::InvalidMask);
     }
 
-    let (version, segments) = resolve_plan(data, &options)?;
-    let ec = options.ec;
+    let (version, segments, bits) = resolve_plan(data, &options)?;
+    let ec = if options.boost_ec {
+        boosted_ec(version, options.ec, bits)
+    } else {
+        options.ec
+    };
 
     let data_codewords = build_data_codewords(data, &segments, options.eci, version, ec);
     let blocks = ec_blocks(version, ec);

@@ -131,6 +131,8 @@ fn forced_mask_is_honoured_and_verifiable() {
             mode: None,
             eci: None,
             assume_shift_jis: false,
+            single_segment: false,
+            boost_ec: false,
         };
         let m = encode(b"HELLO WORLD", opts).unwrap();
         let (ec, mask) = format_info_decode(read_format_bits(&m)).unwrap();
@@ -151,6 +153,8 @@ fn byte_mode_roundtrips_through_ec_correction() {
         mode: Some(Mode::Byte),
         eci: None,
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     let m = encode(&payload, opts).unwrap();
     let v = Version::new(5).unwrap();
@@ -263,6 +267,8 @@ fn smoke_encode_all_versions() {
             mode: Some(Mode::Byte),
             eci: None,
             assume_shift_jis: false,
+            single_segment: false,
+            boost_ec: false,
         };
         let m = encode(&payload, opts).unwrap_or_else(|e| panic!("v{n}: {e}"));
         assert_eq!(m.size(), v.size());
@@ -372,6 +378,8 @@ fn eci_out_of_range_is_rejected() {
         mode: None,
         eci: Some(1_000_000),
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     assert_eq!(encode(b"123", opts), Err(crate::EncodeError::InvalidEci));
 }
@@ -665,6 +673,8 @@ fn too_large_payload_is_rejected() {
         mode: Some(Mode::Byte),
         eci: None,
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     let big = vec![0u8; 1000];
     assert!(encode(&big, opts).is_err());

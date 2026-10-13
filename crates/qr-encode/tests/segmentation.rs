@@ -99,6 +99,8 @@ fn mixed_mode_never_needs_a_larger_version() {
             mode: Some(Mode::Alphanumeric),
             eci: None,
             assume_shift_jis: false,
+            single_segment: false,
+            boost_ec: false,
         },
     )
     .expect("encode");
@@ -237,6 +239,8 @@ fn forced_kanji_mode_roundtrips_and_rejects_non_sjis() {
         mode: Some(Mode::Kanji),
         eci: None,
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     let m = encode(&SJIS_EXAMPLE, opts).expect("encode");
     assert_eq!(qr_decode::decode(&m).expect("decode").bytes, SJIS_EXAMPLE);
@@ -262,6 +266,8 @@ fn eci_26_tagged_utf8_decodes_to_text() {
         mode: None,
         eci: Some(26),
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     let m = encode(text.as_bytes(), opts).expect("encode");
     let decoded = qr_decode::decode(&m).expect("decode");
@@ -283,6 +289,8 @@ fn every_eci_designator_width_roundtrips() {
             mode: None,
             eci: Some(eci),
             assume_shift_jis: false,
+            single_segment: false,
+            boost_ec: false,
         };
         let m = encode(payload, opts).unwrap_or_else(|e| panic!("eci {eci}: {e:?}"));
         let decoded = qr_decode::decode(&m).unwrap_or_else(|e| panic!("eci {eci} decode: {e:?}"));
@@ -299,6 +307,8 @@ fn eci_out_of_range_is_a_clean_error() {
         mode: None,
         eci: Some(1_000_000),
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     assert_eq!(encode(b"123", opts), Err(EncodeError::InvalidEci));
 }
@@ -318,6 +328,8 @@ fn eci_header_is_counted_against_capacity() {
         mode: Some(Mode::Byte),
         eci: None,
         assume_shift_jis: false,
+        single_segment: false,
+        boost_ec: false,
     };
     assert!(encode(&payload, base).is_ok(), "exact fit without ECI");
     let with_eci = Options {
